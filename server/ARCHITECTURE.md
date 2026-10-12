@@ -157,29 +157,31 @@ Use server-side rules associating a source address or range with a complete poli
 ```
 # Illustrative syntax, not an existing configuration format.
 
-[access.storage-agent]
-source=192.168.178.120/32
-leds=disk1,disk2,disk3,disk4
-verbs=CAPS,GET,CLAIM,RENEW,RELEASE,SET,FLUSH
-priority=10
-max_connections=2
-
 [access.admin]
 source=192.168.178.30/32
 leds=all
-verbs=CAPS,GET,CLAIM,RENEW,RELEASE,SET,FLUSH
-priority=100
+verbs=CAPS,GET,SET,RESET,FLUSH
+priority=0
+max_connections=2
+
+[access.storage-agent]
+source=192.168.178.120/32
+leds=disk1,disk2,disk3,disk4
+verbs=CAPS,GET,SET,RESET,FLUSH
+priority=10
 max_connections=2
 
 [access.lan-status]
 source=192.168.178.0/24
 leds=all
 verbs=CAPS,GET
-priority=0
+priority=100
 max_connections=2
 ```
 
 The addresses above are examples, not assertions about where your agents run.
+
+Priority values are integers where values strictly closer to 0 denote higher priority (`0` is highest priority).
 
 Matching rules:
 
@@ -204,14 +206,14 @@ Client connects from 192.168.178.120
 Client → HELLO 1 1
 Server → OK 1 HELLO version=1 access=source-ip
 
-Client → CLAIM 2 disk1 lease_ms=3000
-Server → OK 2 CLAIM
+Client → SET 2 disk1 brightness=128
+Server → OK 2 ACCEPTED generation=1
 
-Client → SET 3 disk1 brightness=128
-Server → OK 3 ACCEPTED generation=42
+Client → SET 3 power mode=off
+Server → ERR 3 FORBIDDEN led=power
 
-Client → SET 4 power mode=off
-Server → ERR 4 FORBIDDEN led=power
+Client → RESET 4 disk1
+Server → OK 4 RESET
 ```
 
 `HELLO <request-id> <protocol-version>` must be the first command.
@@ -229,9 +231,11 @@ SET 10 disk1 mode=on rgb=0,255,0 brightness=128
 SET 11 disk2 mode=blink on_ms=100 off_ms=100
 SET 12 power mode=off
 SET 13 all brightness=64
+RESET 14 disk1
+RESET 15 all
 ```
 
-`SET` updates only the supplied fields; omitted fields retain their current desired values.
+`SET` updates only the supplied fields; omitted fields retain their current desired values. The first connection mutating an unowned LED becomes its owner.
 
 Supported fields:
 
@@ -242,8 +246,11 @@ Supported fields:
 | `brightness` | Value in the range 0–255 |
 | `on_ms` | Blink/breath on duration |
 | `off_ms` | Blink/breath off duration |
+| `priority` | Integer priority; closer to 0 denotes higher priority (must not exceed configured access ceiling) |
 
 The documented CLI accepts 16-bit timing arguments, while the controller protocol encodes total cycle duration and on duration as 16-bit values. Validate the combined cycle in a wider integer type and reject unrepresentable values rather than allowing wraparound. Exact zero-duration behavior must be verified against the backend before implementation.
+
+`RESET <request-id> <target>` releases ownership of the target LED (or all owned LEDs if `all`), resets desired state to configured fallback, and allows other connections to take control.
 
 For `all`, validate authorization and every target before accepting the update.
 
@@ -251,8 +258,10 @@ For `all`, validate authorization and every target before accepting the update.
 
 ```text
 OK 10 ACCEPTED generation=42
+OK 14 RESET
 ERR 11 INVALID_ARGUMENT field=on_ms
-ERR 12 NOT_OWNER led=power
+ERR 12 FORBIDDEN led=power
+ERR 13 REJECTED led=disk1 reason=priority
 ```
 
 `ACCEPTED` means the update passed validation and changed desired state. It does not mean hardware writes have completed.
@@ -302,31 +311,37 @@ Clients must continue reading the connection even when suppressing success respo
 
 ## 6. Multiple-client ownership
 
-Use exclusive, expiring leases per LED.
+Control of an LED is acquired implicitly on mutation and resolved strictly by priority. The service does not use explicit leases, heartbeat renewals, or expiration timers.
 
 ```text
-CLAIM 20 disk1 lease_ms=3000
-RENEW 21 disk1 lease_ms=3000
-RELEASE 22 disk1
+SET 20 disk1 mode=on brightness=128 priority=10
+RESET 21 disk1
 ```
 
 Policy:
 
-- Mutating commands require ownership.
-- A lease belongs to the authenticated session.
-- Disconnect or lease expiry releases ownership.
-- Renewals use the server's monotonic clock.
-- Configured minimum and maximum lease durations bound client requests.
-- A multi-LED claim is all-or-nothing.
-- `all` requires ownership of every supported LED.
-
-Server configuration determines each identity's allowed LEDs and priority. Clients cannot choose their own authority.
-
-Higher-priority identities may preempt lower-priority leases. Equal-priority conflicts return `BUSY`; do not use unpredictable last-writer-wins behavior.
-
-For v1, preemption discards the previous lease. Do not automatically resurrect the previous client's stale state.
-
-On release, disconnect, or expiry, apply a configured per-LED fallback state. Defaulting to a fallback is safer than leaving an activity indicator indefinitely illuminated.
+- **Implicit ownership**: The first connection mutating an unowned LED becomes its owner and has exclusive control over subsequent updates.
+- **Priority definition**:
+  - Priority is represented as an integer where values **strictly closer to 0 denote higher priority** (with `0` being the highest priority).
+  - Both configuration and protocol support priority settings:
+    - **Configuration**: Each access rule assigns a default priority to matching connections.
+    - **Protocol**: Mutating commands (`SET`) may optionally specify `priority=<N>`. Clients cannot claim a higher priority than allowed by their configuration rule (a value closer to 0 than configured is rejected as `FORBIDDEN`).
+- **Conflict and preemption rules**:
+  - If an LED is already owned, incoming mutations from a different connection require a priority check.
+  - A mutating request from a competing connection is accepted only if its priority is **strictly closer to 0** than the current owner's priority.
+  - If priority is not available (omitted from both command and configuration) or is not strictly closer to 0 than the current owner's priority (i.e., equal or lower priority), the `SET` command is rejected (`ERR <id> REJECTED led=<id> reason=priority`).
+  - When accepted, the higher-priority connection preempts ownership and becomes the new owner.
+  - Subsequent less-prioritized mutations are rejected until a `RESET` is issued by the higher-priority connection (or that connection disconnects).
+- **RESET command**:
+  - The current owner may relinquish control by sending `RESET <request-id> <led>`.
+  - Upon `RESET`, ownership is cleared and the LED reverts to its configured fallback state, allowing other connections to control it.
+  - A strictly higher-priority connection may also issue `RESET` to clear an LED held by a lower-priority connection.
+- **Disconnect**:
+  - When an owner connection disconnects, all LEDs owned by that session are automatically released and restored to their configured fallback states.
+- **Multi-LED operations**:
+  - Operations targeting multiple LEDs (such as `all`) are atomic and all-or-nothing: the connection must be able to acquire or preempt every target LED. If any LED fails the priority or authorization check, the entire command is rejected without partial state mutations.
+- **Fallback state**:
+  - On `RESET` or connection disconnect, apply a configured per-LED fallback state. Defaulting to a fallback prevents activity indicators from remaining indefinitely illuminated in an orphaned state.
 
 ## 7. Scheduling and rapid updates
 
@@ -336,7 +351,7 @@ Maintain per LED:
 desired state
 last successfully applied state
 desired generation
-ownership and expiry
+ownership and priority
 dirty fields
 pending/in-flight state
 last hardware error
@@ -373,7 +388,7 @@ Use two threads:
 
 1. Network reactor:
    - Nonblocking sockets and `poll()`.
-   - Parsing, authorization, leases, and desired-state management.
+   - Parsing, authorization, priority-based ownership, and desired-state management.
    - Timers based on `std::chrono::steady_clock`.
 
 2. Hardware worker:
@@ -440,10 +455,10 @@ Map physical disks to front-panel LEDs using explicit, verified identifiers rath
 Clients should:
 
 - Maintain persistent connections.
-- Renew leases.
 - Send only changes.
+- Issue `RESET` when relinquishing control of an LED.
 - Reconnect with bounded exponential backoff and jitter.
-- Re-authenticate, reclaim ownership, and resend complete desired state after reconnecting.
+- Re-authenticate and resend complete desired state after reconnecting.
 - Avoid replaying obsolete activity updates.
 
 ## 11. Proposed directory layout
@@ -493,13 +508,13 @@ Use C++17 explicitly and enable warnings. Do not force static linking solely bec
 ### Stage 2: local service
 
 - Unix socket and loopback TCP.
-- `HELLO`, `CAPS`, `SET`, `GET`, and `FLUSH`.
+- `HELLO`, `CAPS`, `SET`, `GET`, `RESET`, and `FLUSH`.
 - Serialized hardware access and update coalescing.
 
 ### Stage 3: multiple remote clients
 
 - Authentication and LED permissions.
-- Leases, renewal, preemption, and fallback states.
+- Priority-based ownership, preemption, RESET, and fallback states.
 - Connection limits, rate limits, bounded buffers, and backpressure.
 
 ### Stage 4: deployment and performance
@@ -514,8 +529,8 @@ Tests must cover:
 - Fragmented and combined TCP messages.
 - Oversized input and invalid numeric ranges.
 - Slow clients that do not read responses.
-- Disconnect and lease expiry.
-- Conflicting ownership and preemption.
+- Disconnect and ownership release.
+- Conflicting ownership, priority checks, and preemption.
 - Superseded updates and `FLUSH` barriers.
 - Hardware failures during multi-write updates.
 - Bounded memory during sustained overload.
