@@ -1,0 +1,198 @@
+#include "scheduler.h"
+
+#include <algorithm>
+
+namespace ugreen {
+
+Scheduler::Scheduler(const std::vector<LedId>& supported_leds) {
+    for (auto id : supported_leds) {
+        Slot s;
+        s.desired = LedState{};
+        s.applied = LedState{};
+        s.fallback = LedState{};
+        slots_[id] = s;
+    }
+}
+
+void Scheduler::set_fallback(LedId id, const LedState& fallback) {
+    auto it = slots_.find(id);
+    if (it != slots_.end()) {
+        it->second.fallback = fallback;
+    }
+}
+
+uint64_t Scheduler::apply_patch(LedId id, const LedPatch& patch) {
+    auto it = slots_.find(id);
+    if (it == slots_.end()) return current_generation_;
+
+    patch.apply_to(it->second.desired);
+    ++current_generation_;
+    it->second.desired_generation = current_generation_;
+    it->second.dirty = true;
+    return current_generation_;
+}
+
+uint64_t Scheduler::apply_fallback(LedId id) {
+    auto it = slots_.find(id);
+    if (it == slots_.end()) return current_generation_;
+
+    it->second.desired = it->second.fallback;
+    ++current_generation_;
+    it->second.desired_generation = current_generation_;
+    it->second.dirty = true;
+    return current_generation_;
+}
+
+LedState Scheduler::get_desired(LedId id) const {
+    auto it = slots_.find(id);
+    if (it != slots_.end()) return it->second.desired;
+    LedState st;
+    st.valid = false;
+    return st;
+}
+
+LedState Scheduler::get_applied(LedId id) const {
+    auto it = slots_.find(id);
+    if (it != slots_.end()) return it->second.applied;
+    LedState st;
+    st.valid = false;
+    return st;
+}
+
+std::string Scheduler::get_last_error(LedId id) const {
+    auto it = slots_.find(id);
+    if (it != slots_.end()) return it->second.last_hardware_error;
+    return "";
+}
+
+uint64_t Scheduler::applied_generation(LedId id) const {
+    auto it = slots_.find(id);
+    if (it != slots_.end()) return it->second.applied_generation;
+    return 0;
+}
+
+bool Scheduler::has_dirty() const {
+    for (const auto& [id, slot] : slots_) {
+        if (slot.dirty && slot.desired != slot.applied) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::optional<HardwareBatch> Scheduler::generate_batch() {
+    if (in_flight_) {
+        return std::nullopt;
+    }
+
+    HardwareBatch batch;
+    batch.batch_id = next_batch_id_++;
+    uint64_t max_gen = 0;
+
+    for (auto& [id, slot] : slots_) {
+        if (!slot.dirty) continue;
+
+        if (slot.desired == slot.applied) {
+            // Desired state equals applied state (e.g. temporary flash reverted)
+            slot.dirty = false;
+            slot.applied_generation = slot.desired_generation;
+            continue;
+        }
+
+        LedPatch diff = LedPatch::diff(slot.desired, slot.applied);
+        if (!diff.empty()) {
+            batch.operations.push_back(HardwareOperation{id, diff, slot.desired});
+            max_gen = std::max(max_gen, slot.desired_generation);
+        } else {
+            slot.dirty = false;
+            slot.applied_generation = slot.desired_generation;
+        }
+    }
+
+    if (batch.empty()) {
+        evaluate_barriers();
+        return std::nullopt;
+    }
+
+    batch.max_generation = max_gen;
+    in_flight_ = true;
+    in_flight_batch_id_ = batch.batch_id;
+    return batch;
+}
+
+void Scheduler::on_batch_complete(const HardwareBatchResult& result) {
+    in_flight_ = false;
+
+    for (const auto& [id, state] : result.applied_states) {
+        auto it = slots_.find(id);
+        if (it != slots_.end()) {
+            it->second.applied = state;
+            it->second.last_hardware_error.clear();
+            it->second.applied_generation = std::max(it->second.applied_generation, result.max_generation);
+            if (it->second.desired == it->second.applied) {
+                it->second.dirty = false;
+            }
+        }
+    }
+
+    if (!result.success) {
+        if (result.failed_led) {
+            auto it = slots_.find(*result.failed_led);
+            if (it != slots_.end()) {
+                it->second.last_hardware_error = result.error_message;
+                it->second.dirty = true;
+            }
+        }
+    }
+
+    evaluate_barriers();
+}
+
+void Scheduler::evaluate_barriers() {
+    auto it = pending_barriers_.begin();
+    while (it != pending_barriers_.end()) {
+        uint64_t target = it->target_generation;
+        bool all_satisfied = true;
+        bool hardware_failed = false;
+        std::string err_msg;
+
+        for (const auto& [id, slot] : slots_) {
+            if (!slot.last_hardware_error.empty()) {
+                hardware_failed = true;
+                err_msg = slot.last_hardware_error;
+            }
+            if (slot.dirty && slot.desired_generation <= target && slot.desired != slot.applied) {
+                all_satisfied = false;
+            }
+        }
+
+        if (hardware_failed) {
+            it->callback(false, err_msg.empty() ? "HARDWARE_ERROR" : err_msg);
+            it = pending_barriers_.erase(it);
+        } else if (all_satisfied && !in_flight_) {
+            it->callback(true, "");
+            it = pending_barriers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Scheduler::add_flush_barrier(uint64_t client_id, uint64_t req_id, uint64_t target_gen,
+                                  std::function<void(bool, const std::string&)> cb) {
+    pending_barriers_.push_back(FlushBarrier{client_id, req_id, target_gen, std::move(cb)});
+    evaluate_barriers();
+}
+
+void Scheduler::cancel_barriers_for_client(uint64_t client_id) {
+    auto it = pending_barriers_.begin();
+    while (it != pending_barriers_.end()) {
+        if (it->client_id == client_id) {
+            it = pending_barriers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+} // namespace ugreen

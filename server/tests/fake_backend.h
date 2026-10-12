@@ -1,0 +1,6 @@
+#ifndef UGREEN_SERVER_TESTS_FAKE_BACKEND_H
+#define UGREEN_SERVER_TESTS_FAKE_BACKEND_H
+
+#include "../include/fake_backend.h"
+
+#endif // UGREEN_SERVER_TESTS_FAKE_BACKEND_H
