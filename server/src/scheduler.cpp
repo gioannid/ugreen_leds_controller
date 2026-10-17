@@ -25,9 +25,25 @@ uint64_t Scheduler::apply_patch(LedId id, const LedPatch& patch) {
     auto it = slots_.find(id);
     if (it == slots_.end()) return current_generation_;
 
+    OpMode old_mode = it->second.desired.mode;
     patch.apply_to(it->second.desired);
-    if ((it->second.desired.mode == OpMode::Blink || it->second.desired.mode == OpMode::Breath) &&
-        it->second.desired.on_ms + it->second.desired.off_ms == 0) {
+
+    // If switching to breath mode without explicit timing, use breath default timing (1000/1000)
+    // rather than inheriting fast blink timing.
+    if (patch.mode && *patch.mode == OpMode::Breath && !patch.on_ms && !patch.off_ms &&
+        old_mode != OpMode::Breath) {
+        it->second.desired.on_ms = 1000;
+        it->second.desired.off_ms = 1000;
+    }
+    // If switching to blink mode without explicit timing, use blink default timing (500/500)
+    // rather than inheriting slow breath timing.
+    else if (patch.mode && *patch.mode == OpMode::Blink && !patch.on_ms && !patch.off_ms &&
+             old_mode != OpMode::Blink) {
+        it->second.desired.on_ms = 500;
+        it->second.desired.off_ms = 500;
+    }
+    else if ((it->second.desired.mode == OpMode::Blink || it->second.desired.mode == OpMode::Breath) &&
+             it->second.desired.on_ms + it->second.desired.off_ms == 0) {
         it->second.desired.on_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
         it->second.desired.off_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
     }

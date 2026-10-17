@@ -126,6 +126,21 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
         target.mode = OpMode::Blink;
     }
 
+    // If switching mode to Breath without explicit timing from a non-breath mode,
+    // do not inherit fast blink timing.
+    if (patch.mode && *patch.mode == OpMode::Breath && !patch.on_ms && !patch.off_ms &&
+        current.mode != OpMode::Breath) {
+        target.on_ms = 1000;
+        target.off_ms = 1000;
+    }
+    // If switching mode to Blink without explicit timing from a non-blink mode,
+    // do not inherit slow breath timing.
+    else if (patch.mode && *patch.mode == OpMode::Blink && !patch.on_ms && !patch.off_ms &&
+             current.mode != OpMode::Blink) {
+        target.on_ms = 500;
+        target.off_ms = 500;
+    }
+
     std::vector<ControllerOp> ops;
 
     if (target.rgb != current.rgb) {
