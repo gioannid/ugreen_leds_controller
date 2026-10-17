@@ -1,5 +1,6 @@
 #include "config.h"
 #include "fake_backend.h"
+#include "i2c_led_backend.h"
 #include "logger.h"
 #include "reactor.h"
 
@@ -30,6 +31,7 @@ int main(int argc, char* argv[]) {
     std::optional<int> cli_port;
     std::optional<int> cli_interval;
     std::optional<std::string> cli_log_file;
+    std::optional<std::string> cli_backend;
     bool cli_verbose = false;
     bool cli_no_unix = false;
     bool cli_no_tcp = false;
@@ -51,6 +53,8 @@ int main(int argc, char* argv[]) {
             cli_lock = argv[++i];
         } else if (arg == "--log-file" && i + 1 < argc) {
             cli_log_file = argv[++i];
+        } else if (arg == "--backend" && i + 1 < argc) {
+            cli_backend = argv[++i];
         } else if (arg == "--verbose") {
             cli_verbose = true;
         } else if (arg == "--no-unix") {
@@ -67,17 +71,18 @@ int main(int argc, char* argv[]) {
 
     if (cli_help) {
         std::cout << "Usage: ugreen_leds_server [options]\n"
-                  << "  --config <path>     Load configuration file (access rules, fallbacks, limits)\n"
-                  << "  --socket <path>     Unix domain socket path\n"
-                  << "  --bind <ip>         TCP bind address (default: " << config.transport.tcp_bind_ip << ")\n"
-                  << "  --port <port>       TCP port (default: " << config.transport.tcp_port << ")\n"
-                   << "  --interval <ms>     Scheduler interval in ms\n"
-                   << "  --lock-file <path>  Process lock file to prevent duplicate instances\n"
-                   << "  --log-file <path>   Write log messages to a file (default: screen)\n"
-                   << "  --verbose           Enable debug-level logging for troubleshooting\n"
-                   << "  --no-unix           Disable Unix socket listener\n"
-                   << "  --no-tcp            Disable TCP listener\n"
-                  << "  --help              Display this help message\n"
+                   << "  --config <path>     Load configuration file (access rules, fallbacks, limits)\n"
+                   << "  --socket <path>     Unix domain socket path\n"
+                   << "  --bind <ip>         TCP bind address (default: " << config.transport.tcp_bind_ip << ")\n"
+                   << "  --port <port>       TCP port (default: " << config.transport.tcp_port << ")\n"
+                    << "  --interval <ms>     Scheduler interval in ms\n"
+                    << "  --lock-file <path>  Process lock file to prevent duplicate instances\n"
+                    << "  --log-file <path>   Write log messages to a file (default: screen)\n"
+                    << "  --backend <name>    LED backend: fake (simulator) or i2c (real hardware)\n"
+                    << "  --verbose           Enable debug-level logging for troubleshooting\n"
+                    << "  --no-unix           Disable Unix socket listener\n"
+                    << "  --no-tcp            Disable TCP listener\n"
+                   << "  --help              Display this help message\n"
                   << "\nCommand-line options override values from --config.\n"
                   << "Without --config a permissive local-only development policy is used;\n"
                   "production deployments must configure an explicit access policy.\n";
@@ -101,6 +106,11 @@ int main(int argc, char* argv[]) {
     if (cli_verbose) config.verbose = true;
     if (cli_no_unix) config.transport.enable_unix_socket = false;
     if (cli_no_tcp) config.transport.enable_tcp = false;
+    if (cli_backend) config.backend = *cli_backend;
+    if (config.backend != "fake" && config.backend != "i2c") {
+        std::cerr << "Invalid backend '" << config.backend << "' (expected fake or i2c)\n";
+        return 1;
+    }
 
     // Make the effective policy visible in the startup log (the Reactor
     // would apply the same defaults to its own copy otherwise).
@@ -126,7 +136,36 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    auto backend = std::make_unique<ugreen::FakeLedBackend>();
+    std::unique_ptr<ugreen::LedBackend> backend;
+    if (config.backend == "i2c") {
+        std::unique_ptr<ugreen::I2cLedBackend> i2c;
+        try {
+            i2c = std::make_unique<ugreen::I2cLedBackend>();
+        } catch (const std::exception& ex) {
+            ugreen::log::error("I2C backend failed to initialize: " + std::string(ex.what()));
+            return 1;
+        }
+        std::string i2c_device = i2c->device_path();
+        auto caps = i2c->capabilities();
+        if (caps.supported_leds.empty()) {
+            ugreen::log::error("no LEDs detected on I2C controller " + i2c_device +
+                               "; check that the i2c-dev module is loaded, the device node is "
+                               "accessible, and no competing LED controller (e.g. the led_ugreen "
+                               "kernel module) is active");
+            return 1;
+        }
+        std::string leds_str;
+        for (auto l : caps.supported_leds) {
+            if (!leds_str.empty()) leds_str += ",";
+            leds_str += ugreen::to_string(l);
+        }
+        ugreen::log::info("  i2c backend: device=" + i2c_device +
+                          " supported_leds=" + leds_str);
+        backend = std::move(i2c);
+    } else {
+        backend = std::make_unique<ugreen::FakeLedBackend>();
+        ugreen::log::warn("backend=fake: LED simulator in use, real hardware will not be controlled");
+    }
     ugreen::Reactor reactor(config, std::move(backend));
     g_reactor = &reactor;
 

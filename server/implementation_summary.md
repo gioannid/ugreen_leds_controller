@@ -1,12 +1,15 @@
-# UGREEN LED Server — Stages 1–3 Implementation
+# UGREEN LED Server — Stages 1–4 Implementation
 
 ## Build & Test
 
 ```bash
 cd server/
-make clean && make     # Builds ugreen_leds_server, test_runner, example_client
-make test              # Runs the full test suite (60 tests, all pass)
+make clean && make     # Builds ugreen_leds_server, test_runner, example_client, hw_smoke_test
+make test              # Runs the full test suite (79 tests, all pass)
 ```
+
+`hw_smoke_test` is a separate, statically linked binary for the production
+machine with the real LED hardware (see Stage 4 below).
 
 ## What was built
 
@@ -43,7 +46,35 @@ make test              # Runs the full test suite (60 tests, all pass)
 | [`systemd/ugreen-leds-server.service`](systemd/ugreen-leds-server.service) | Hardened unit: dedicated user, `RuntimeDirectory`, `UMask=0077`, `DeviceAllow` for the I2C bus, no-new-privileges, private tmp/home |
 | [`examples/ugreen-leds-server.conf`](examples/ugreen-leds-server.conf) | Example config: local admin over Unix socket, LAN rules with LED subsets / verbs / priority ceilings / per-rule connection caps, fallback state |
 
-### Test Suite (60 tests)
+### Stage 4: Integrate with existing controller code for real LED HW
+
+| File | Purpose |
+|---|---|
+| [`include/i2c_led_backend.h`](include/i2c_led_backend.h) / [`src/i2c_led_backend.cpp`](src/i2c_led_backend.cpp) | `I2cLedBackend` — wraps the existing userspace controller (`cli/ugreen_leds.cpp`, compiled in unmodified, no copies); SMBus I801 adapter auto-discovery (the CLI's own rule); `plan_led_update()` maps a partial patch to the minimal controller command sequence (pure function); CLI-style retry timing; post-write verification via the chip's last-modification result register (0x80) |
+| [`include/config.h`](include/config.h) / [`src/config.cpp`](src/config.cpp) | `[server]` key `backend` (fake\|i2c); validation |
+| [`src/main.cpp`](src/main.cpp) | `--backend` flag; constructs the selected backend; refuses to start with a clear error when the I2C controller is unavailable or reports zero LEDs; warns when the fake simulator is in use |
+| [`tests/hw/hardware_smoke_test.cpp`](tests/hw/hardware_smoke_test.cpp) | `hw_smoke_test` — standalone real-hardware smoke test (see below) |
+
+**Backend behavior** (`I2cLedBackend`):
+
+- Constructor resolves the device (first "SMBus I801 adapter" in `/sys/class/i2c-dev`, the CLI's own rule — kept server-side only to name the exact device in error messages), opens it through the unmodified `ugreen_leds_t::start()` at the chip's fixed address `0x3a`, and probes all 10 LED IDs to build the capability report. Throws `HardwareException` with the `errno` message when the adapter, device node, or chip is missing — the server refuses to start.
+- `apply()` reads the current hardware state first, merges the patch (which is a *diff* from the scheduler), and issues only the changed controller commands: `set_rgb`, `set_brightness`, `set_onoff`, `set_blink`/`set_breath` (blink/breath commands carry the cycle timing, so a timing change in the same mode re-issues exactly one mode command).
+- Every command is verified against the chip's result register with the CLI's proven retry timing (settle delays, 5 attempts); a write the chip did not acknowledge is reported as `HardwareException` and handled by the existing scheduler error/retry path.
+- `read()` maps a verified 11-byte status block to `LedState` (timing zeroed for non-blink modes, where the chip may retain stale values).
+
+**Real-hardware smoke test** (`hw_smoke_test`):
+
+- Built as a separate statically linked binary (`make hw_smoke_test`) so it can be copied to the production machine as a single file and run there, e.g. `sudo ./hw_smoke_test --confirm`.
+- Reports the detected controller and supported LEDs, then drives one LED (default: first available disk LED; the power LED is refused without `--include-power`) through: solid red → blink green (250/250 ms) → breath blue (500/500 ms) → solid white → off. Every step is verified by reading the controller back (mode, RGB, brightness, and blink/breath timing must match exactly).
+- With `--confirm` the test additionally asks the user to confirm each visible state by eye (and for an initial "proceed?" approval); a "no" answer is counted as a failed check.
+- Verifies that a non-present LED ID is rejected by the backend, and restores the LED's original state at the end. Exit codes: 0 = passed, 1 = checks failed, 2 = environment error, 3 = cancelled by user.
+
+**Stage 4 tests without hardware** (in `test_runner`, follow the existing paradigm):
+
+- `backend` config key: parsing, rejection of unknown backends, defaults.
+- Device-discovery sanity and an environment-aware construction test: on a host without the UGREEN chip the backend must fail cleanly; on the production host it must come up, report LEDs, and reject non-present ones. The same test suite therefore passes on both machines.
+
+### Test Suite (79 tests)
 
 | Test File | Tests |
 |---|---|
@@ -56,6 +87,7 @@ make test              # Runs the full test suite (60 tests, all pass)
 | [`tests/integration_tests.cpp`](tests/integration_tests.cpp) | Full end-to-end over Unix socket (HELLO→CAPS→SET→GET→FLUSH→GET→RESET); TCP multi-client priority preemption; `reply=none` suppression |
 | [`tests/access_tests.cpp`](tests/access_tests.cpp) | No-match denial, LED restriction, verb restriction, priority ceiling + stronger-rule preemption, per-rule connection limit + release, server-wide connection limit, command rate limit with refill, hardware-read rate limit, slow-client backpressure disconnect |
 | [`tests/stress_tests.cpp`](tests/stress_tests.cpp) | 1000-connection churn with `VmRSS` growth check (< 32 MB), 6-thread sustained parallel load, hardware failure storm (100 failing FLUSH rounds then recovery) |
+| [`tests/i2c_backend_tests.cpp`](tests/i2c_backend_tests.cpp) | Stage 4 without hardware: `plan_led_update()` command planning, controller-op descriptions, device discovery sanity, environment-aware backend construction, `backend` config parsing and rejection cases |
 
 ## Architecture Alignment
 
@@ -67,6 +99,8 @@ The implementation follows the ARCHITECTURE.md design:
 - **Scheduling**: per-LED desired/applied state, dirty-field tracking, single in-flight batch, generation-based FLUSH barriers
 - **`reply=none`**: suppresses `OK ACCEPTED` but not errors
 - **Timing validation**: rejects `on_ms + off_ms > 65535` (16-bit cycle overflow) and zero-cycle blink/breath
+- **Single copy of the controller code, unmodified**: the server compiles `cli/i2c.cpp` and `cli/ugreen_leds.cpp` directly (objects `cli_i2c.o`, `cli_ugreen_leds.o`); `I2cLedBackend` wraps `ugreen_leds_t` as-is and keeps no copies of the wire protocol. The `cli/` sources are untouched, so the legacy CLI carries zero regression risk from the server.
+- **Two hardware paths, one interface**: `FakeLedBackend` (default, development) and `I2cLedBackend` (real HW, `backend=i2c`) both satisfy the `LedBackend` interface; the reactor, scheduler, ownership, and worker code is backend-agnostic.
 
 ### Stage 3 behavior
 
@@ -79,8 +113,17 @@ The implementation follows the ARCHITECTURE.md design:
 - **Logging**: leveled, thread-safe logging for production observability and troubleshooting. Info-level and above (startup/shutdown, listener bind results, connections accepted/rejected, authentication, authorization violations, hardware failures) are on by default and go to the screen (stdout, captured by the journal); `--verbose` / `verbose=true` adds debug-level detail (per-command processing, rate-limiting, scheduler batches, hardware read/write results, protocol errors with the offending line). `--log-file` / `log_file=` redirects the log to a file (append mode, per-line flush); an unopenable file aborts startup. Line format: `2026-10-17T10:15:30.123Z [INFO] message`.
 - **Deployment**: systemd unit with a dedicated user, runtime directory, socket file mode 0700, device access to the I2C bus, and standard hardening; `--lock-file` enforces a single instance.
 
+### Stage 4 behavior
+
+- **Backend selection**: `backend=fake` (default) keeps the development behavior (simulator, real hardware untouched, startup warning); `backend=i2c` opens the real controller and the server refuses to start when the controller cannot be opened or reports zero LEDs.
+- **Fail-fast with diagnostics**: missing adapter, missing device node, and chip-not-present all produce a distinct `HardwareException` message (with the `errno` text) that is logged at startup.
+- **Ownership of I/O**: all controller reads/writes happen on the hardware worker thread; `capabilities()` returns the constructor-time probe cache, so the reactor can serve CAPS without touching the bus.
+- **Verification semantics**: a batch is "applied" only when every command was acknowledged by the chip's result register; otherwise the existing error_generation/retry machinery applies.
+
 ### Test notes
 
 - Network tests allocate loopback ports dynamically (`bind` to port 0) so they cannot collide with unrelated processes on the host.
 - The backpressure test pins the client's `SO_RCVBUF` (disables rcvbuf auto-tuning) and floods more GETs than the kernel can absorb while never reading, forcing the send-queue overflow; teardown is detected via EOF or RST.
 - Memory growth is checked via `VmRSS` from `/proc/self/status` (valgrind is not available in the build environment).
+- The Stage 4 construction test is environment-aware: it probes whether a UGREEN controller is actually reachable at the chip's fixed address (0x3a) and asserts either a clean `HardwareException` (development host) or a working backend (production host), so `make test` passes on both.
+- Real-hardware verification lives in the separate `hw_smoke_test` binary (statically linked, single file) — it is not part of `make test` on purpose, because it changes the physical LED state and only runs where the hardware exists.

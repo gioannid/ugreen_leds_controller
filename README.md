@@ -3,9 +3,9 @@ LED Controller for UGREEN's DX/DXP NAS Series
 
 ## LED Network Server (this fork)
 
-This fork adds an experimental **LED network service** in [`server/`](server/), an independent daemon that exposes the front-panel LEDs over a Unix domain socket and TCP using a line-delimited protocol (Protocol v1; see [`server/PROTOCOL.md`](server/PROTOCOL.md) for the client-facing protocol reference and [`server/ARCHITECTURE.md`](server/ARCHITECTURE.md) for the full design). It is intended to let multiple monitoring agents (disk I/O, network activity, storage health, ...) own and drive individual LEDs with priority-based arbitration.
+This fork adds a  **LED network service** in [`server/`](server/), an independent daemon that exposes the front-panel LEDs over a Unix domain socket and TCP using a line-delimited protocol (Protocol v1; see [`server/PROTOCOL.md`](server/PROTOCOL.md) for the client-facing protocol reference and [`server/ARCHITECTURE.md`](server/ARCHITECTURE.md) for the full design). It is intended to let multiple monitoring agents (disk I/O, network activity, storage health, ... even if they are running in server-hosted LXCs or VMs) own and drive individual LEDs with priority-based arbitration.
 
-### Implemented (stages 1–3)
+### Implemented
 
 - **Protocol v1** — `HELLO`, `CAPS`, `SET`, `GET`, `RESET`, `FLUSH`; strict typed parsing, duplicate/unknown-field rejection, 16-bit blink-cycle validation
 - **Local service** — Unix socket + loopback TCP, non-blocking `poll()` reactor plus a dedicated hardware worker thread with serialized writes and update coalescing (many state changes collapse into one hardware write)
@@ -14,7 +14,8 @@ This fork adds an experimental **LED network service** in [`server/`](server/), 
 - **Backpressure and bounded buffers** — 1 KiB line / 8 KiB recv / 32 KiB send queue per session; a client that never reads responses is disconnected while the service stays responsive
 - **Logging** — leveled logging with ISO-8601 UTC timestamps: info-level events (connections, authorization, hardware failures) are on by default for production observability; `--verbose` adds debug-level detail for troubleshooting. Output goes to the screen (stdout, captured by the journal) by default, or to a file with `--log-file` (also configurable in the INI config via `log_file` / `verbose`)
 - **Deployment** — INI config (see [`server/examples/ugreen-leds-server.conf`](server/examples/ugreen-leds-server.conf)), single-instance `flock`, graceful shutdown, hardened systemd unit ([`server/systemd/ugreen-leds-server.service`](server/systemd/ugreen-leds-server.service))
-- **Tests** — 60 unit/integration/stress tests in `server/` (including 1000-connection churn with a memory-growth check and a hardware failure storm)
+- **Real LED hardware (stage 4)** — `I2cLedBackend` wraps the existing userspace controller (compiled in unmodified, no protocol copies), auto-discovers the SMBus I801 adapter the same way the CLI does, and probes LED availability at startup, verifying every write against the chip's result register. Selected via `backend=i2c` in the config (or `--backend i2c`); without it the daemon uses the `FakeLedBackend` simulator. Real-hardware verification is a separate statically linked `hw_smoke_test` binary for the production machine (read-back verification of each step, optional `--confirm` to verify by eye, state restore).
+- **Tests** — 79 unit/integration/stress tests in `server/` (including 1000-connection churn with a memory-growth check, a hardware failure storm, and hardware-free `I2cLedBackend` planning/config tests)
 
 ```bash
 cd server
@@ -23,12 +24,12 @@ make && make test     # build and run the full test suite
 ./ugreen_leds_server --config /path/to/ugreen-leds-server.conf
 ./ugreen_leds_server --verbose          # debug-level logging to the screen
 ./ugreen_leds_server --log-file /var/log/ugreen-leds-server.log   # log to a file
+sudo ./hw_smoke_test --confirm          # real-hardware smoke test (on the NAS owning the LEDs)
 ```
 
 ### Not yet available
 
-- **Real hardware (stage 4)** — the daemon currently talks to `FakeLedBackend`, an in-memory simulator. The `I2CLedBackend` wrapping the existing controller code (see [Communication Protocols](#communication-protocols)) is not implemented yet, so the server does not drive the actual LEDs.
-- **Monitoring clients** — per the architecture, telemetry agents (disk I/O, network activity, storage health, filesystem capacity) live outside the server and are not shipped in this fork. The original `scripts/ugreen-diskiomon` / `ugreen-netdevmon` keep working via the CLI/kernel-module path, not via the new server.
+- **Monitoring clients** — telemetry agents (disk I/O, network activity, storage health, filesystem capacity etc.) live outside the server. The original `scripts/ugreen-diskiomon` / `ugreen-netdevmon` keep working via the CLI/kernel-module path, not via the new server.
 - **UDP / binary protocol** — deliberately deferred until real-hardware measurements justify it.
 - **Disk slot mapping** — mapping physical disks to `disk1..diskN` stays a client-side concern (see [Disk Mapping](#disk-mapping)).
 

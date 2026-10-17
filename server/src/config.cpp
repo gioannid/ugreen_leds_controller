@@ -446,6 +446,13 @@ bool load_server_config(const std::string& path, ServerConfig& out, std::string&
                     error = "line " + std::to_string(line_no) + ": invalid verbose '" + val + "'";
                     return false;
                 }
+            } else if (key == "backend") {
+                if (val != "fake" && val != "i2c") {
+                    error = "line " + std::to_string(line_no) + ": invalid backend '" + val +
+                            "' (expected fake or i2c)";
+                    return false;
+                }
+                cfg.backend = val;
             } else {
                 error = "line " + std::to_string(line_no) + ": unknown server key '" + key + "'";
                 return false;
