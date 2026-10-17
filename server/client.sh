@@ -1,1 +1,1 @@
-ssh -t cli@nas-dev "socat - UNIX-CONNECT:/tmp/ugreen-leds-server.sock"
+ssh -t localhost "socat - UNIX-CONNECT:/tmp/ugreen_leds.sock"
