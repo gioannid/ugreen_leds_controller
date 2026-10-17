@@ -26,6 +26,11 @@ uint64_t Scheduler::apply_patch(LedId id, const LedPatch& patch) {
     if (it == slots_.end()) return current_generation_;
 
     patch.apply_to(it->second.desired);
+    if ((it->second.desired.mode == OpMode::Blink || it->second.desired.mode == OpMode::Breath) &&
+        it->second.desired.on_ms + it->second.desired.off_ms == 0) {
+        it->second.desired.on_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
+        it->second.desired.off_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
+    }
     ++current_generation_;
     it->second.desired_generation = current_generation_;
     it->second.dirty = true;
@@ -37,6 +42,11 @@ uint64_t Scheduler::apply_fallback(LedId id) {
     if (it == slots_.end()) return current_generation_;
 
     it->second.desired = it->second.fallback;
+    if ((it->second.desired.mode == OpMode::Blink || it->second.desired.mode == OpMode::Breath) &&
+        it->second.desired.on_ms + it->second.desired.off_ms == 0) {
+        it->second.desired.on_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
+        it->second.desired.off_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
+    }
     ++current_generation_;
     it->second.desired_generation = current_generation_;
     it->second.dirty = true;

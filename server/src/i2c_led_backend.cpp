@@ -37,10 +37,10 @@ LedState to_led_state(const ugreen_leds_t::led_data_t& d) {
     s.mode = to_op_mode(d.op_mode);
     s.brightness = d.brightness;
     s.rgb = {d.color_r, d.color_g, d.color_b};
-    // Timing is only meaningful in blink/breath mode; the chip may retain
-    // stale values otherwise.
-    if (d.op_mode == ugreen_leds_t::op_mode_t::blink ||
-        d.op_mode == ugreen_leds_t::op_mode_t::breath) {
+    // The controller chip retains its programmed cycle timing in registers
+    // 5-8 across on/off changes. Preserve it whenever non-zero so returning
+    // to blink/breath mode retains the hardware cycle.
+    if (d.t_on + d.t_off > 0) {
         s.on_ms = d.t_on;
         s.off_ms = d.t_off;
     }
@@ -119,6 +119,13 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
     LedState target = current;
     patch.apply_to(target);
 
+    // If timing is provided without an explicit mode for an LED currently
+    // in off/on mode, infer that the client intends to enter blink mode.
+    if ((patch.on_ms || patch.off_ms) && !patch.mode &&
+        target.mode != OpMode::Blink && target.mode != OpMode::Breath) {
+        target.mode = OpMode::Blink;
+    }
+
     std::vector<ControllerOp> ops;
 
     if (target.rgb != current.rgb) {
@@ -153,11 +160,19 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
                 op.type = ControllerOp::Type::SetBlink;
                 op.on_ms = target.on_ms;
                 op.off_ms = target.off_ms;
+                if (op.on_ms + op.off_ms == 0) {
+                    op.on_ms = 500;
+                    op.off_ms = 500;
+                }
                 break;
             case OpMode::Breath:
                 op.type = ControllerOp::Type::SetBreath;
                 op.on_ms = target.on_ms;
                 op.off_ms = target.off_ms;
+                if (op.on_ms + op.off_ms == 0) {
+                    op.on_ms = 1000;
+                    op.off_ms = 1000;
+                }
                 break;
         }
         ops.push_back(op);
@@ -171,6 +186,10 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
                       : ControllerOp::Type::SetBreath;
         op.on_ms = target.on_ms;
         op.off_ms = target.off_ms;
+        if (op.on_ms + op.off_ms == 0) {
+            op.on_ms = (target.mode == OpMode::Blink) ? 500 : 1000;
+            op.off_ms = (target.mode == OpMode::Blink) ? 500 : 1000;
+        }
         ops.push_back(op);
     }
 
