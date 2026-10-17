@@ -10,6 +10,7 @@ void run_scheduler_tests();
 void run_integration_tests();
 void run_access_tests();
 void run_stress_tests();
+void run_logger_tests();
 
 int main() {
     std::cout << "=======================================\n";
@@ -24,6 +25,9 @@ int main() {
     run_integration_tests();
     run_access_tests();
     run_stress_tests();
+    // Logger tests manipulate the process-wide logger; they run last and
+    // leave it in the silent (uninitialized) state the other suites expect.
+    run_logger_tests();
 
     std::cout << "=======================================\n";
     std::cout << "Summary: " << test::g_passed_tests << " passed, "

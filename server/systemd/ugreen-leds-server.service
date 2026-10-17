@@ -7,6 +7,9 @@ Type=simple
 # Dedicated service account; grant it access to the I2C device node only.
 User=ugreen-leds
 Group=ugreen-leds
+# Log messages go to stdout (journal) by default. To log to a file instead,
+# add --log-file /var/log/ugreen-leds-server.log; --verbose enables
+# debug-level logging for troubleshooting.
 ExecStart=/usr/local/bin/ugreen_leds_server --config /etc/ugreen-leds/ugreen-leds-server.conf
 Restart=on-failure
 RestartSec=2

@@ -5,7 +5,7 @@
 ```bash
 cd server/
 make clean && make     # Builds ugreen_leds_server, test_runner, example_client
-make test              # Runs the full test suite (52 tests, all pass)
+make test              # Runs the full test suite (60 tests, all pass)
 ```
 
 ## What was built
@@ -29,6 +29,7 @@ make test              # Runs the full test suite (52 tests, all pass)
 | [`include/scheduler.h`](include/scheduler.h) / [`src/scheduler.cpp`](src/scheduler.cpp) | Desired/applied state tracking, update coalescing, single in-flight batch, FLUSH barriers |
 | [`include/hardware_worker.h`](include/hardware_worker.h) / [`src/hardware_worker.cpp`](src/hardware_worker.cpp) | Dedicated worker thread for serialized HW access; eventfd wakeup; bounded queue |
 | [`include/reactor.h`](include/reactor.h) / [`src/reactor.cpp`](src/reactor.cpp) | Nonblocking `poll()`-based network reactor; Unix + TCP listeners; session management |
+| [`include/logger.h`](include/logger.h) / [`src/logger.cpp`](src/logger.cpp) | Thread-safe leveled logger (DEBUG/INFO/WARN/ERROR) with ISO-8601 UTC timestamps; screen (stdout) or file target; silent until initialized so tests stay quiet |
 | [`src/main.cpp`](src/main.cpp) | Entry point with CLI args (`--socket`, `--bind`, `--port`, `--interval`, etc.) |
 | [`examples/client.cpp`](examples/client.cpp) | Example client (Unix socket or `--tcp`) |
 
@@ -38,17 +39,18 @@ make test              # Runs the full test suite (52 tests, all pass)
 |---|---|
 | [`include/config.h`](include/config.h) / [`src/config.cpp`](src/config.cpp) | INI config parsing: `[server]` + `[access.<name>]` + `[fallback]`; IPv4/IPv6 CIDR sources; most-specific-prefix rule selection; full validation (server refuses to start on any error); dev defaults for unconfigured runs |
 | [`include/reactor.h`](include/reactor.h) / [`src/reactor.cpp`](src/reactor.cpp) | Connection authorization at accept time, per-rule connection limits, LED/verb/priority-ceiling enforcement, per-connection command rate limit, server-wide hardware-read rate limit, bounded per-session send queue with overflow disconnect (backpressure) |
-| [`src/main.cpp`](src/main.cpp) | `--config` loading (CLI overrides config), single-instance `flock` lock file, graceful SIGINT/SIGTERM shutdown, startup logging of transport + access rules |
+| [`src/main.cpp`](src/main.cpp) | `--config` loading (CLI overrides config), single-instance `flock` lock file, graceful SIGINT/SIGTERM shutdown, logging setup (`--log-file`, `--verbose`) and startup logging of transport + access rules |
 | [`systemd/ugreen-leds-server.service`](systemd/ugreen-leds-server.service) | Hardened unit: dedicated user, `RuntimeDirectory`, `UMask=0077`, `DeviceAllow` for the I2C bus, no-new-privileges, private tmp/home |
 | [`examples/ugreen-leds-server.conf`](examples/ugreen-leds-server.conf) | Example config: local admin over Unix socket, LAN rules with LED subsets / verbs / priority ceilings / per-rule connection caps, fallback state |
 
-### Test Suite (52 tests)
+### Test Suite (60 tests)
 
 | Test File | Tests |
 |---|---|
 | [`tests/protocol_tests.cpp`](tests/protocol_tests.cpp) | Fragmented/combined TCP messages, line overflow, all verb parsing, duplicate fields, timing constraints, response serialization |
 | [`tests/fake_backend_tests.cpp`](tests/fake_backend_tests.cpp) | Capabilities, apply/read, unsupported LED exception, injected failures |
-| [`tests/config_tests.cpp`](tests/config_tests.cpp) | Valid full config, most-specific prefix selection, local-only Unix rule, duplicate network/name rejection, missing source, invalid values, unknown sections/keys, dev defaults, IPv6 parsing, permission helpers |
+| [`tests/config_tests.cpp`](tests/config_tests.cpp) | Valid full config, most-specific prefix selection, local-only Unix rule, duplicate network/name rejection, missing source, invalid values, unknown sections/keys, dev defaults, IPv6 parsing, permission helpers, logging keys (`log_file`, `verbose`) |
+| [`tests/logger_tests.cpp`](tests/logger_tests.cpp) | Level gating (info default, debug with verbose), screen/file targets, line format and timestamp, append across restarts, unopenable-file failure, pre-init no-op |
 | [`tests/ownership_tests.cpp`](tests/ownership_tests.cpp) | Implicit acquisition, priority preemption/rejection, atomic multi-LED, RESET, disconnect release |
 | [`tests/scheduler_tests.cpp`](tests/scheduler_tests.cpp) | Update coalescing (20→1 write), no-op suppression, short-flash coalescence, FLUSH barrier success/failure |
 | [`tests/integration_tests.cpp`](tests/integration_tests.cpp) | Full end-to-end over Unix socket (HELLO→CAPS→SET→GET→FLUSH→GET→RESET); TCP multi-client priority preemption; `reply=none` suppression |
@@ -74,6 +76,7 @@ The implementation follows the ARCHITECTURE.md design:
 - **Backpressure**: each session has a bounded send queue (`kMaxQueuedOutput` = 32 KiB). The reactor keeps reading input (bounded by the 8 KiB recv buffer and the TCP window) and registers `POLLOUT` only while the queue is non-empty so responses drain as the client reads. A client that never consumes output grows its queue until overflow, at which point the server drops the connection; the service stays responsive to other clients. Registering `POLLOUT` unconditionally would make `poll()` return immediately for every idle-but-writable client, starving the scheduler's time-based ticks and busy-spinning the reactor.
 - **Stale hardware errors**: a failed batch records `error_generation`; FLUSH barriers are failed only by errors at or below the current desired generation, so a retry in flight does not poison later barriers.
 - **Configuration**: `[server]` transport/limit settings, `[access.<name>]` rules (source, leds, verbs, priority, max_connections), `[fallback]` per-LED state. Without config (or with no rules) the server applies development defaults: local Unix + loopback access to all LEDs at priority 0 — documented as unsafe for production.
+- **Logging**: leveled, thread-safe logging for production observability and troubleshooting. Info-level and above (startup/shutdown, listener bind results, connections accepted/rejected, authentication, authorization violations, hardware failures) are on by default and go to the screen (stdout, captured by the journal); `--verbose` / `verbose=true` adds debug-level detail (per-command processing, rate-limiting, scheduler batches, hardware read/write results, protocol errors with the offending line). `--log-file` / `log_file=` redirects the log to a file (append mode, per-line flush); an unopenable file aborts startup. Line format: `2026-10-17T10:15:30.123Z [INFO] message`.
 - **Deployment**: systemd unit with a dedicated user, runtime directory, socket file mode 0700, device access to the I2C bus, and standard hardening; `--lock-file` enforces a single instance.
 
 ### Test notes

@@ -1,4 +1,5 @@
 #include "hardware_worker.h"
+#include "logger.h"
 
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -22,6 +23,7 @@ void HardwareWorker::start() {
     if (running_.exchange(true)) {
         return;
     }
+    log::debug("hardware worker thread started");
     thread_ = std::thread(&HardwareWorker::worker_loop, this);
 }
 
@@ -36,6 +38,7 @@ void HardwareWorker::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
+    log::debug("hardware worker thread stopped");
 }
 
 bool HardwareWorker::submit_batch(HardwareBatch batch) {

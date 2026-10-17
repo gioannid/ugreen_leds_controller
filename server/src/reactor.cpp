@@ -1,3 +1,4 @@
+#include "logger.h"
 #include "reactor.h"
 
 #include <arpa/inet.h>
@@ -9,8 +10,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
-#include <iostream>
 
 namespace ugreen {
 
@@ -49,7 +50,9 @@ bool Reactor::init() {
 
     if (config_.transport.enable_unix_socket) {
         unix_listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (unix_listen_fd_ >= 0) {
+        if (unix_listen_fd_ < 0) {
+            log::error(std::string("cannot create unix socket: ") + strerror(errno));
+        } else {
             set_nonblocking(unix_listen_fd_);
             sockaddr_un addr{};
             addr.sun_family = AF_UNIX;
@@ -58,7 +61,10 @@ bool Reactor::init() {
 
             if (bind(unix_listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
                 listen(unix_listen_fd_, 16);
+                log::info("listening on unix socket " + config_.transport.unix_socket_path);
             } else {
+                log::error("cannot bind unix socket " + config_.transport.unix_socket_path +
+                           ": " + strerror(errno));
                 close(unix_listen_fd_);
                 unix_listen_fd_ = -1;
             }
@@ -67,7 +73,9 @@ bool Reactor::init() {
 
     if (config_.transport.enable_tcp) {
         tcp_listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-        if (tcp_listen_fd_ >= 0) {
+        if (tcp_listen_fd_ < 0) {
+            log::error(std::string("cannot create TCP socket: ") + strerror(errno));
+        } else {
             set_nonblocking(tcp_listen_fd_);
             int opt = 1;
             setsockopt(tcp_listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -79,7 +87,11 @@ bool Reactor::init() {
 
             if (bind(tcp_listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
                 listen(tcp_listen_fd_, 16);
+                log::info("listening on TCP " + config_.transport.tcp_bind_ip + ":" +
+                          std::to_string(config_.transport.tcp_port));
             } else {
+                log::error("cannot bind TCP " + config_.transport.tcp_bind_ip + ":" +
+                           std::to_string(config_.transport.tcp_port) + ": " + strerror(errno));
                 close(tcp_listen_fd_);
                 tcp_listen_fd_ = -1;
             }
@@ -161,23 +173,30 @@ bool Reactor::authorize_and_add(int fd, bool is_unix, const sockaddr_storage& pe
 
     if (config_.max_total_connections > 0 &&
         clients_.size() >= static_cast<size_t>(config_.max_total_connections)) {
+        log::warn("connection rejected from " + addr_str + ": server connection limit (" +
+                  std::to_string(config_.max_total_connections) + ") reached");
         reject_connection(fd, "server_limit");
         return false;
     }
 
     const AccessRule* rule = match_access_rule(config_, peer, peer_len, is_unix);
     if (!rule) {
+        log::warn("connection rejected from " + addr_str + ": no matching access rule");
         reject_connection(fd, "no_matching_rule");
         return false;
     }
 
     int rule_idx = static_cast<int>(rule - config_.access_rules.data());
     if (rule->max_connections > 0 && rule_connection_counts_[rule_idx] >= rule->max_connections) {
+        log::warn("connection rejected from " + addr_str + ": rule '" + rule->name +
+                  "' connection limit (" + std::to_string(rule->max_connections) + ") reached");
         reject_connection(fd, "connection_limit");
         return false;
     }
 
-    add_client_fd(fd, is_unix, addr_str, rule);
+    uint64_t cid = add_client_fd(fd, is_unix, addr_str, rule);
+    log::info("client " + std::to_string(cid) + " connected from " + addr_str +
+              " (rule " + rule->name + ", priority " + std::to_string(rule->priority) + ")");
     return true;
 }
 
@@ -305,6 +324,15 @@ void Reactor::handle_worker_wakeup() {
     auto completed_batches = worker_.pop_completed_batches();
     for (const auto& b : completed_batches) {
         scheduler_.on_batch_complete(b);
+        if (b.success) {
+            log::debug("hardware batch " + std::to_string(b.batch_id) + " applied " +
+                       std::to_string(b.applied_states.size()) + " operation(s), generation " +
+                       std::to_string(b.max_generation));
+        } else {
+            std::string led = b.failed_led ? to_string(*b.failed_led) : "unknown";
+            log::warn("hardware batch " + std::to_string(b.batch_id) + " failed on led " + led +
+                      ": " + b.error_message);
+        }
     }
 
     auto completed_reads = worker_.pop_completed_reads();
@@ -312,6 +340,8 @@ void Reactor::handle_worker_wakeup() {
         auto it = clients_.find(r.client_id);
         if (it != clients_.end()) {
             if (r.success) {
+                log::debug("hardware read of " + to_string(r.id) + " ok (client " +
+                           std::to_string(r.client_id) + ")");
                 Response resp = Response::ok(r.request_id, "GET", {
                     {"led", to_string(r.id)},
                     {"source", "hardware"},
@@ -324,6 +354,7 @@ void Reactor::handle_worker_wakeup() {
                 });
                 send_response(it->second, resp);
             } else {
+                log::warn("hardware read of " + to_string(r.id) + " failed: " + r.error_message);
                 Response resp = Response::error(r.request_id, "HARDWARE_ERROR", {
                     {"led", to_string(r.id)},
                 });
@@ -342,6 +373,8 @@ void Reactor::on_scheduler_tick() {
         if (scheduler_.has_dirty()) {
             auto batch = scheduler_.generate_batch();
             if (batch) {
+                log::debug("scheduler: submitted batch " + std::to_string(batch->batch_id) +
+                           " with " + std::to_string(batch->operations.size()) + " operation(s)");
                 worker_.submit_batch(std::move(*batch));
             }
         }
@@ -359,6 +392,7 @@ void Reactor::handle_client_read(uint64_t client_id) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return;
         }
+        log::debug("client " + std::to_string(client_id) + ": read error: " + std::string(strerror(errno)));
         disconnect_client(client_id);
         return;
     }
@@ -368,6 +402,7 @@ void Reactor::handle_client_read(uint64_t client_id) {
     }
 
     if (session.recv_buffer.append(buf, n) == StreamBuffer::AppendResult::BufferOverflow) {
+        log::warn("client " + std::to_string(client_id) + ": receive buffer overflow, disconnecting");
         disconnect_client(client_id);
         return;
     }
@@ -376,6 +411,8 @@ void Reactor::handle_client_read(uint64_t client_id) {
     bool line_overflow = false;
     while (session.recv_buffer.extract_line(line, line_overflow)) {
         if (line_overflow) {
+            log::warn("client " + std::to_string(client_id) + ": line exceeds " +
+                      std::to_string(kMaxLineLength) + " byte limit, disconnecting");
             disconnect_client(client_id);
             return;
         }
@@ -385,9 +422,15 @@ void Reactor::handle_client_read(uint64_t client_id) {
         auto result = ProtocolParser::parse_line(line);
         if (result.status == ParseResult::Status::Error) {
             if (result.error_response) {
+                std::string resp = result.error_response->serialize();
+                if (!resp.empty() && resp.back() == '\n') resp.pop_back();
+                log::debug("client " + std::to_string(client_id) + ": protocol error " + resp +
+                           " line: " + line);
                 send_response(session, *result.error_response);
             }
             if (result.should_close) {
+                log::warn("client " + std::to_string(client_id) +
+                          ": framing violation, disconnecting");
                 disconnect_client(client_id);
                 return;
             }
@@ -409,6 +452,7 @@ void Reactor::handle_client_write(uint64_t client_id) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return;
         }
+        log::debug("client " + std::to_string(client_id) + ": write error: " + std::string(strerror(errno)));
         disconnect_client(client_id);
         return;
     }
@@ -419,6 +463,7 @@ void Reactor::send_response(ClientSession& session, const Response& resp) {
     std::string serialized = resp.serialize();
     if (session.send_buffer.size() + serialized.size() > kMaxQueuedOutput) {
         // Output buffer full per Section 5 limits
+        log::warn("client " + std::to_string(session.client_id) + ": output queue overflow, disconnecting");
         disconnect_client(session.client_id);
         return;
     }
@@ -431,6 +476,7 @@ void Reactor::send_response(ClientSession& session, const Response& resp) {
             }
             return;
         } else if (n < 0 && (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            log::debug("client " + std::to_string(session.client_id) + ": write error: " + std::string(strerror(errno)));
             disconnect_client(session.client_id);
             return;
         }
@@ -468,10 +514,15 @@ void Reactor::disconnect_client(uint64_t client_id) {
     }
     clients_.erase(it);
 
+    log::info("client " + std::to_string(client_id) + " disconnected (" + it->second.remote_addr +
+              ", released " + std::to_string(released_leds.size()) + " leds)");
+
     // Trigger update immediately if fallback states were applied
     if (!released_leds.empty()) {
         auto batch = scheduler_.generate_batch();
         if (batch) {
+            log::debug("scheduler: submitted fallback batch " + std::to_string(batch->batch_id) +
+                       " with " + std::to_string(batch->operations.size()) + " operation(s)");
             worker_.submit_batch(std::move(*batch));
         }
     }
@@ -483,6 +534,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
     // Handshake enforcement: HELLO must be the first command
     if (!session.authenticated) {
         if (req.verb != Verb::Hello) {
+            log::debug("client " + std::to_string(session.client_id) + ": " +
+                       to_string(req.verb) + " before HELLO, disconnecting");
             Response err = Response::error(req.request_id, "PROTOCOL_ERROR", {{"reason", "hello_required"}});
             send_response(session, err);
             disconnect_client(session.client_id);
@@ -492,6 +545,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
 
     // Per-connection command rate limit (token bucket, burst = rate)
     if (!consume_command_token(session)) {
+        log::debug("client " + std::to_string(session.client_id) + ": command rate limit exceeded (request " +
+                   std::to_string(req.request_id) + ")");
         send_response(session, Response::error(req.request_id, "RATE_LIMITED", {
             {"reason", "command_rate"},
         }));
@@ -500,6 +555,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
 
     // Verb permission from the matched access rule
     if (req.verb != Verb::Hello && !rule_allows_verb(session.rule, req.verb)) {
+        log::warn("client " + std::to_string(session.client_id) + ": forbidden verb " +
+                  to_string(req.verb) + " (request " + std::to_string(req.request_id) + ")");
         send_response(session, Response::error(req.request_id, "FORBIDDEN", {
             {"verb", to_string(req.verb)},
         }));
@@ -510,6 +567,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
         case Verb::Hello: {
             session.authenticated = true;
             std::string access = session.is_unix_socket ? "local" : session.remote_addr;
+            log::info("client " + std::to_string(session.client_id) + " authenticated (access=" + access +
+                      ", priority " + std::to_string(session.configured_priority) + ")");
             Response resp = Response::ok(req.request_id, "HELLO", {
                 {"version", "1"},
                 {"access", access},
@@ -540,6 +599,9 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
             // closer to 0 than their configured access rule allows.
             if (req.patch.priority && *req.patch.priority < session.configured_priority) {
                 std::string led_str = req.target.is_all ? "all" : to_string(req.target.id);
+                log::warn("client " + std::to_string(session.client_id) + ": requested priority " +
+                          std::to_string(*req.patch.priority) + " above rule ceiling " +
+                          std::to_string(session.configured_priority) + " for " + led_str);
                 send_response(session, Response::error(req.request_id, "FORBIDDEN", {
                     {"led", led_str},
                     {"reason", "priority"},
@@ -549,6 +611,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
 
             if (req.target.is_all) {
                 if (!rule_allows_all_leds(session.rule, caps.supported_leds)) {
+                    log::warn("client " + std::to_string(session.client_id) + ": SET all not allowed (request " +
+                              std::to_string(req.request_id) + ")");
                     send_response(session, Response::error(req.request_id, "FORBIDDEN", {
                         {"led", "all"},
                     }));
@@ -556,6 +620,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 }
 
                 if (!ownership_.can_mutate_all(caps.supported_leds, session.client_id, prio)) {
+                    log::debug("client " + std::to_string(session.client_id) + ": SET all rejected by priority (request " +
+                               std::to_string(req.request_id) + ")");
                     Response err = Response::error(req.request_id, "REJECTED", {
                         {"led", "all"},
                         {"reason", "priority"},
@@ -570,6 +636,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                     gen = scheduler_.apply_patch(led, req.patch);
                 }
                 session.last_activity_gen = gen;
+                log::debug("client " + std::to_string(session.client_id) + ": SET all accepted (generation " +
+                           std::to_string(gen) + ")");
 
                 if (!req.reply_none) {
                     Response resp = Response::ok(req.request_id, "ACCEPTED", {
@@ -579,6 +647,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 }
             } else {
                 if (!caps.is_led_supported(req.target.id)) {
+                    log::debug("client " + std::to_string(session.client_id) + ": unsupported led " +
+                               to_string(req.target.id) + " (request " + std::to_string(req.request_id) + ")");
                     Response err = Response::error(req.request_id, "UNSUPPORTED_LED", {
                         {"led", to_string(req.target.id)},
                     });
@@ -587,6 +657,9 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 }
 
                 if (!rule_allows_led(session.rule, req.target.id)) {
+                    log::warn("client " + std::to_string(session.client_id) + ": led " +
+                              to_string(req.target.id) + " not allowed (request " +
+                              std::to_string(req.request_id) + ")");
                     send_response(session, Response::error(req.request_id, "FORBIDDEN", {
                         {"led", to_string(req.target.id)},
                     }));
@@ -594,6 +667,9 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 }
 
                 if (!ownership_.can_mutate(req.target.id, session.client_id, prio)) {
+                    log::debug("client " + std::to_string(session.client_id) + ": SET " +
+                               to_string(req.target.id) + " rejected by priority (request " +
+                               std::to_string(req.request_id) + ")");
                     Response err = Response::error(req.request_id, "REJECTED", {
                         {"led", to_string(req.target.id)},
                         {"reason", "priority"},
@@ -605,6 +681,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 ownership_.acquire_or_preempt(req.target.id, session.client_id, prio);
                 uint64_t gen = scheduler_.apply_patch(req.target.id, req.patch);
                 session.last_activity_gen = gen;
+                log::debug("client " + std::to_string(session.client_id) + ": SET " +
+                           to_string(req.target.id) + " accepted (generation " + std::to_string(gen) + ")");
 
                 if (!req.reply_none) {
                     Response resp = Response::ok(req.request_id, "ACCEPTED", {
@@ -618,6 +696,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
 
         case Verb::Get: {
             if (!caps.is_led_supported(req.target.id)) {
+                log::debug("client " + std::to_string(session.client_id) + ": unsupported led " +
+                           to_string(req.target.id) + " (request " + std::to_string(req.request_id) + ")");
                 Response err = Response::error(req.request_id, "UNSUPPORTED_LED", {
                     {"led", to_string(req.target.id)},
                 });
@@ -626,11 +706,18 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
             }
 
             if (!rule_allows_led(session.rule, req.target.id)) {
+                log::warn("client " + std::to_string(session.client_id) + ": led " +
+                          to_string(req.target.id) + " not allowed (request " +
+                          std::to_string(req.request_id) + ")");
                 send_response(session, Response::error(req.request_id, "FORBIDDEN", {
                     {"led", to_string(req.target.id)},
                 }));
                 return;
             }
+
+            log::debug("client " + std::to_string(session.client_id) + ": GET " +
+                       to_string(req.target.id) + " source=" + req.source +
+                       " (request " + std::to_string(req.request_id) + ")");
 
             if (req.source == "desired") {
                 auto st = scheduler_.get_desired(req.target.id);
@@ -660,6 +747,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 send_response(session, resp);
             } else if (req.source == "hardware") {
                 if (!consume_hw_read_token()) {
+                    log::debug("client " + std::to_string(session.client_id) + ": hardware read rate limit exceeded (request " +
+                               std::to_string(req.request_id) + ")");
                     send_response(session, Response::error(req.request_id, "RATE_LIMITED", {
                         {"reason", "hardware_read"},
                     }));
@@ -676,10 +765,14 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 for (auto led : released) {
                     scheduler_.apply_fallback(led);
                 }
+                log::debug("client " + std::to_string(session.client_id) + ": RESET all (released " +
+                           std::to_string(released.size()) + " leds)");
                 Response resp = Response::ok(req.request_id, "RESET");
                 send_response(session, resp);
             } else {
                 if (!caps.is_led_supported(req.target.id)) {
+                    log::debug("client " + std::to_string(session.client_id) + ": unsupported led " +
+                               to_string(req.target.id) + " (request " + std::to_string(req.request_id) + ")");
                     Response err = Response::error(req.request_id, "UNSUPPORTED_LED", {
                         {"led", to_string(req.target.id)},
                     });
@@ -688,6 +781,9 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 }
 
                 if (!rule_allows_led(session.rule, req.target.id)) {
+                    log::warn("client " + std::to_string(session.client_id) + ": led " +
+                              to_string(req.target.id) + " not allowed (request " +
+                              std::to_string(req.request_id) + ")");
                     send_response(session, Response::error(req.request_id, "FORBIDDEN", {
                         {"led", to_string(req.target.id)},
                     }));
@@ -695,6 +791,9 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 }
 
                 if (!ownership_.can_reset(req.target.id, session.client_id, session.configured_priority)) {
+                    log::debug("client " + std::to_string(session.client_id) + ": RESET " +
+                               to_string(req.target.id) + " rejected by priority (request " +
+                               std::to_string(req.request_id) + ")");
                     Response err = Response::error(req.request_id, "REJECTED", {
                         {"led", to_string(req.target.id)},
                         {"reason", "priority"},
@@ -705,6 +804,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
 
                 ownership_.reset(req.target.id, session.client_id, session.configured_priority);
                 scheduler_.apply_fallback(req.target.id);
+                log::debug("client " + std::to_string(session.client_id) + ": RESET " +
+                           to_string(req.target.id) + " (request " + std::to_string(req.request_id) + ")");
                 Response resp = Response::ok(req.request_id, "RESET");
                 send_response(session, resp);
             }
@@ -715,6 +816,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
             uint64_t target_gen = session.last_activity_gen;
             uint64_t cid = session.client_id;
             uint64_t req_id = req.request_id;
+            log::debug("client " + std::to_string(cid) + ": FLUSH barrier (generation " +
+                       std::to_string(target_gen) + ", request " + std::to_string(req_id) + ")");
 
             scheduler_.add_flush_barrier(cid, req_id, target_gen, [this, cid, req_id](bool ok, const std::string& /*err*/) {
                 auto it = clients_.find(cid);
@@ -722,6 +825,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                     if (ok) {
                         send_response(it->second, Response::ok(req_id, "FLUSH"));
                     } else {
+                        log::debug("client " + std::to_string(cid) + ": FLUSH failed (request " +
+                                   std::to_string(req_id) + ")");
                         send_response(it->second, Response::error(req_id, "HARDWARE_ERROR"));
                     }
                 }
@@ -730,6 +835,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
         }
 
         default:
+            log::debug("client " + std::to_string(session.client_id) + ": invalid command (request " +
+                       std::to_string(req.request_id) + ")");
             Response err = Response::error(req.request_id, "INVALID_COMMAND");
             send_response(session, err);
             break;

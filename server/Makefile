@@ -8,7 +8,8 @@ SERVER_SRCS = src/main.cpp \
               src/ownership.cpp \
               src/scheduler.cpp \
               src/hardware_worker.cpp \
-              src/reactor.cpp
+              src/reactor.cpp \
+              src/logger.cpp
 
 SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
 
@@ -18,12 +19,14 @@ LIB_OBJS = src/led_state.o \
            src/ownership.o \
            src/scheduler.o \
            src/hardware_worker.o \
-           src/reactor.o
+           src/reactor.o \
+           src/logger.o
 
 TEST_SRCS = tests/test_main.cpp \
             tests/protocol_tests.cpp \
             tests/fake_backend_tests.cpp \
             tests/config_tests.cpp \
+            tests/logger_tests.cpp \
             tests/ownership_tests.cpp \
             tests/scheduler_tests.cpp \
             tests/integration_tests.cpp \

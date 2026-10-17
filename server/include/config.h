@@ -55,6 +55,8 @@ struct ServerConfig {
     int command_rate_limit = 500;        // commands/sec per connection, 0 = unlimited
     int hardware_read_rate_limit = 10;   // reads/sec server-wide, 0 = unlimited
     std::string lock_file;               // process lock file, empty = disabled
+    std::string log_file;                // log target file, empty = screen (stdout)
+    bool verbose = false;                // enable debug-level logging (troubleshooting)
 
     ServerConfig() = default;
     // Allows constructing a transport-only config (development default:

@@ -53,6 +53,8 @@ void run_config_tests() {
             "command_rate_limit=25\n"
             "hardware_read_rate_limit=5\n"
             "lock_file=/tmp/x.lock\n"
+            "log_file=/tmp/x.log\n"
+            "verbose=true\n"
             "[access.local-admin]\n"
             "source=local\n"
             "leds=all\n"
@@ -74,6 +76,8 @@ void run_config_tests() {
         TEST_ASSERT_EQ(cfg.command_rate_limit, 25);
         TEST_ASSERT_EQ(cfg.hardware_read_rate_limit, 5);
         TEST_ASSERT_EQ(cfg.lock_file, "/tmp/x.lock");
+        TEST_ASSERT_EQ(cfg.log_file, "/tmp/x.log");
+        TEST_ASSERT(cfg.verbose);
         TEST_ASSERT_EQ(cfg.access_rules.size(), 2u);
 
         const auto& r0 = cfg.access_rules[0];
@@ -219,6 +223,14 @@ void run_config_tests() {
                      "power=mode=on\n",
                      cfg, err);
         TEST_ASSERT(!ok);
+
+        ok = load_ok("[server]\nverbose=maybe\n", cfg, err);
+        TEST_ASSERT(!ok);
+
+        ok = load_ok("[server]\nverbose=no\nlog_file=\n", cfg, err);
+        TEST_ASSERT(ok);
+        TEST_ASSERT(!cfg.verbose);
+        TEST_ASSERT(cfg.log_file.empty());
     });
 
     test::run_test("Unknown section and key rejected", []() {

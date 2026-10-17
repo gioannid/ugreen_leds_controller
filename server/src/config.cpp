@@ -439,6 +439,13 @@ bool load_server_config(const std::string& path, ServerConfig& out, std::string&
                 cfg.hardware_read_rate_limit = static_cast<int>(v);
             } else if (key == "lock_file") {
                 cfg.lock_file = val;
+            } else if (key == "log_file") {
+                cfg.log_file = val;
+            } else if (key == "verbose") {
+                if (!parse_bool_field(val, cfg.verbose)) {
+                    error = "line " + std::to_string(line_no) + ": invalid verbose '" + val + "'";
+                    return false;
+                }
             } else {
                 error = "line " + std::to_string(line_no) + ": unknown server key '" + key + "'";
                 return false;
