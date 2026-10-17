@@ -68,13 +68,13 @@ For Proxmox, run the service on the host owning the controller. Monitoring agent
 
 ## 3. Reuse of existing code
 
-Initially compile the server against:
+The userspace controller sources live in a single shared location under `cli/`. The server compiles and links them directly from there; it keeps no copies:
 
 ```text
-server/ugreen_leds.cpp
-server/ugreen_leds.h
-server/i2c.cpp
-server/i2c.h
+cli/ugreen_leds.cpp
+cli/ugreen_leds.h
+cli/i2c.cpp
+cli/i2c.h
 ```
 
 Do not execute `ugreen_leds_cli` for each network request. Repeated process creation would undermine the purpose of a resident service.

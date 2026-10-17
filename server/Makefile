@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -pedantic -pthread -Iinclude -Isrc
+CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -pedantic -pthread -Iinclude -Isrc -I../cli
 
 SERVER_SRCS = src/main.cpp \
               src/led_state.cpp \
@@ -12,6 +12,10 @@ SERVER_SRCS = src/main.cpp \
               src/logger.cpp
 
 SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
+
+# Shared userspace controller sources, compiled from cli/ (single copy).
+# Objects are written to this directory; cli/ is not modified.
+COMMON_OBJS = cli_i2c.o cli_ugreen_leds.o
 
 LIB_OBJS = src/led_state.o \
            src/protocol.o \
@@ -40,7 +44,13 @@ all: ugreen_leds_server test_runner example_client
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-ugreen_leds_server: $(SERVER_OBJS)
+cli_i2c.o: ../cli/i2c.cpp ../cli/i2c.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+cli_ugreen_leds.o: ../cli/ugreen_leds.cpp ../cli/ugreen_leds.h ../cli/i2c.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+ugreen_leds_server: $(SERVER_OBJS) $(COMMON_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 test_runner: $(LIB_OBJS) $(TEST_OBJS)
@@ -53,6 +63,6 @@ test: test_runner
 	./test_runner
 
 clean:
-	rm -f src/*.o tests/*.o examples/*.o ugreen_leds_server test_runner example_client
+	rm -f src/*.o tests/*.o examples/*.o $(COMMON_OBJS) ugreen_leds_server test_runner example_client
 
 .PHONY: all test clean
