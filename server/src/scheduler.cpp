@@ -140,6 +140,7 @@ void Scheduler::on_batch_complete(const HardwareBatchResult& result) {
             auto it = slots_.find(*result.failed_led);
             if (it != slots_.end()) {
                 it->second.last_hardware_error = result.error_message;
+                it->second.error_generation = result.max_generation;
                 it->second.dirty = true;
             }
         }
@@ -157,7 +158,11 @@ void Scheduler::evaluate_barriers() {
         std::string err_msg;
 
         for (const auto& [id, slot] : slots_) {
-            if (!slot.last_hardware_error.empty()) {
+            // Only a current (non-stale) hardware error fails the barrier:
+            // an error from a batch whose generation the desired state has
+            // since surpassed is being retried, so the barrier must wait.
+            if (!slot.last_hardware_error.empty() &&
+                slot.desired_generation <= slot.error_generation) {
                 hardware_failed = true;
                 err_msg = slot.last_hardware_error;
             }

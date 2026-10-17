@@ -25,6 +25,8 @@ enum class Verb {
     Unknown,
 };
 
+std::string to_string(Verb verb);
+
 struct Target {
     bool is_all = false;
     LedId id = LedId::Power;

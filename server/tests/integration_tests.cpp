@@ -45,6 +45,29 @@ static void write_all(int fd, const std::string& str) {
     }
 }
 
+// Finds a free loopback TCP port (avoids clashes with unrelated processes).
+static int find_free_port() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0;
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    sockaddr_in local{};
+    socklen_t slen = sizeof(local);
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&local), &slen) != 0) {
+        close(fd);
+        return -1;
+    }
+    int port = ntohs(local.sin_port);
+    close(fd);
+    return port;
+}
+
 void run_integration_tests() {
     std::cout << "Running Integration Tests...\n";
 
@@ -153,7 +176,7 @@ void run_integration_tests() {
         config.enable_unix_socket = false;
         config.enable_tcp = true;
         config.tcp_bind_ip = "127.0.0.1";
-        config.tcp_port = 39876;
+        config.tcp_port = find_free_port();
         config.scheduler_interval_ms = 10;
 
         auto backend = std::make_unique<FakeLedBackend>();

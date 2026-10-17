@@ -4,6 +4,7 @@ CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -pedantic -pthread -Iinclude -Isrc
 SERVER_SRCS = src/main.cpp \
               src/led_state.cpp \
               src/protocol.cpp \
+              src/config.cpp \
               src/ownership.cpp \
               src/scheduler.cpp \
               src/hardware_worker.cpp \
@@ -13,6 +14,7 @@ SERVER_OBJS = $(SERVER_SRCS:.cpp=.o)
 
 LIB_OBJS = src/led_state.o \
            src/protocol.o \
+           src/config.o \
            src/ownership.o \
            src/scheduler.o \
            src/hardware_worker.o \
@@ -21,9 +23,12 @@ LIB_OBJS = src/led_state.o \
 TEST_SRCS = tests/test_main.cpp \
             tests/protocol_tests.cpp \
             tests/fake_backend_tests.cpp \
+            tests/config_tests.cpp \
             tests/ownership_tests.cpp \
             tests/scheduler_tests.cpp \
-            tests/integration_tests.cpp
+            tests/integration_tests.cpp \
+            tests/access_tests.cpp \
+            tests/stress_tests.cpp
 
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 

@@ -52,6 +52,10 @@ public:
         uint64_t applied_generation = 0;
         bool dirty = false;
         std::string last_hardware_error;
+        // Generation of the failed batch that produced last_hardware_error.
+        // An error is stale (does not fail FLUSH barriers) once the desired
+        // state has advanced past it, since a retry is pending.
+        uint64_t error_generation = 0;
     };
 
     explicit Scheduler(const std::vector<LedId>& supported_leds);

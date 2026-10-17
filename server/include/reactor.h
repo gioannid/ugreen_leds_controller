@@ -1,6 +1,7 @@
 #ifndef UGREEN_SERVER_REACTOR_H
 #define UGREEN_SERVER_REACTOR_H
 
+#include "config.h"
 #include "hardware_worker.h"
 #include "ownership.h"
 #include "protocol.h"
@@ -14,22 +15,17 @@
 
 namespace ugreen {
 
-struct ReactorConfig {
-    std::string unix_socket_path = "/tmp/ugreen_leds.sock";
-    std::string tcp_bind_ip = "127.0.0.1";
-    int tcp_port = 39001;
-    int scheduler_interval_ms = 20;
-    bool enable_unix_socket = true;
-    bool enable_tcp = true;
-};
-
 struct ClientSession {
     uint64_t client_id = 0;
     int fd = -1;
     bool is_unix_socket = false;
     std::string remote_addr;
     bool authenticated = false;
-    int default_priority = 100;
+    const AccessRule* rule = nullptr;
+    int rule_index = -1;
+    int configured_priority = 100;
+    double rate_tokens = 0;
+    std::chrono::steady_clock::time_point rate_refill_time;
     StreamBuffer recv_buffer;
     std::string send_buffer;
     uint64_t last_activity_gen = 0;
@@ -37,7 +33,7 @@ struct ClientSession {
 
 class Reactor {
 public:
-    Reactor(ReactorConfig config, std::unique_ptr<LedBackend> backend);
+    Reactor(ServerConfig config, std::unique_ptr<LedBackend> backend);
     ~Reactor();
 
     bool init();
@@ -48,7 +44,8 @@ public:
     void poll_once(int timeout_ms = 0);
 
     // Direct client connection injection for testing
-    uint64_t add_client_fd(int fd, bool is_unix, const std::string& addr);
+    uint64_t add_client_fd(int fd, bool is_unix, const std::string& addr,
+                           const AccessRule* rule);
 
     // Accessors for test inspection
     Scheduler& scheduler() { return scheduler_; }
@@ -57,6 +54,11 @@ public:
     size_t active_clients_count() const { return clients_.size(); }
 
 private:
+    bool authorize_and_add(int fd, bool is_unix, const sockaddr_storage& peer, socklen_t peer_len);
+    void reject_connection(int fd, const char* reason);
+    bool consume_command_token(ClientSession& session);
+    bool consume_hw_read_token();
+
     void handle_listener(int listen_fd, bool is_unix);
     void handle_client_read(uint64_t client_id);
     void handle_client_write(uint64_t client_id);
@@ -67,7 +69,7 @@ private:
     void send_response(ClientSession& session, const Response& resp);
     void disconnect_client(uint64_t client_id);
 
-    ReactorConfig config_;
+    ServerConfig config_;
     HardwareWorker worker_;
     Scheduler scheduler_;
     OwnershipManager ownership_;
@@ -78,6 +80,9 @@ private:
 
     uint64_t next_client_id_ = 1;
     std::map<uint64_t, ClientSession> clients_;
+    std::map<int, size_t> rule_connection_counts_;
+    double hw_read_tokens_ = 0;
+    std::chrono::steady_clock::time_point hw_read_refill_time_;
     std::chrono::steady_clock::time_point last_tick_time_;
 };
 

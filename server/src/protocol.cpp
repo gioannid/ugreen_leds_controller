@@ -6,6 +6,19 @@
 
 namespace ugreen {
 
+std::string to_string(Verb verb) {
+    switch (verb) {
+        case Verb::Hello: return "HELLO";
+        case Verb::Caps: return "CAPS";
+        case Verb::Set: return "SET";
+        case Verb::Get: return "GET";
+        case Verb::Reset: return "RESET";
+        case Verb::Flush: return "FLUSH";
+        case Verb::Unknown: return "UNKNOWN";
+    }
+    return "UNKNOWN";
+}
+
 StreamBuffer::AppendResult StreamBuffer::append(const char* data, size_t len) {
     if (buffer_.size() + len > kMaxRecvBuffer) {
         return AppendResult::BufferOverflow;

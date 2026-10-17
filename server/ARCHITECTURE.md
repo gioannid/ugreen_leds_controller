@@ -516,15 +516,10 @@ Use C++17 explicitly and enable warnings. Do not force static linking solely bec
 - Authentication and LED permissions.
 - Priority-based ownership, preemption, RESET, and fallback states.
 - Connection limits, rate limits, bounded buffers, and backpressure.
+- systemd unit and example configuration.
 - Run stress tests to check against memory leaks or other system instability.
 
-### Stage 4: deployment and performance
-
-- systemd unit and example configuration.
-- Persistent example client.
-- Measure receive-to-apply latency, hardware operations per second, CPU use, and controller error rate.
-
-### Stage 5: Wrap existing controller code for real LED HW
+### Stage 4: Integrate with existing controller code for real LED HW
 - Wrap existing controller code.
 - Implement I2CLedBackend for real led HW
 - Add tests specific to real led HW, incl. explicitly approved hardware smoke tests.

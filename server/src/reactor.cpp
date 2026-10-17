@@ -20,10 +20,23 @@ static bool set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
 }
 
-Reactor::Reactor(ReactorConfig config, std::unique_ptr<LedBackend> backend)
+Reactor::Reactor(ServerConfig config, std::unique_ptr<LedBackend> backend)
     : config_(std::move(config)),
       worker_(std::move(backend)),
       scheduler_(worker_.capabilities().supported_leds) {
+    // Development convenience: without an explicit access policy, allow Unix
+    // socket and loopback connections. Deployments must configure an
+    // explicit policy (ARCHITECTURE.md section 5: no match means deny).
+    apply_dev_defaults(config_);
+
+    for (const auto& [led, state] : config_.fallbacks) {
+        scheduler_.set_fallback(led, state);
+    }
+
+    hw_read_tokens_ = config_.hardware_read_rate_limit > 0
+                          ? static_cast<double>(config_.hardware_read_rate_limit)
+                          : 0;
+    hw_read_refill_time_ = std::chrono::steady_clock::now();
     last_tick_time_ = std::chrono::steady_clock::now();
 }
 
@@ -34,14 +47,14 @@ Reactor::~Reactor() {
 bool Reactor::init() {
     worker_.start();
 
-    if (config_.enable_unix_socket) {
+    if (config_.transport.enable_unix_socket) {
         unix_listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
         if (unix_listen_fd_ >= 0) {
             set_nonblocking(unix_listen_fd_);
             sockaddr_un addr{};
             addr.sun_family = AF_UNIX;
-            std::strncpy(addr.sun_path, config_.unix_socket_path.c_str(), sizeof(addr.sun_path) - 1);
-            unlink(config_.unix_socket_path.c_str());
+            std::strncpy(addr.sun_path, config_.transport.unix_socket_path.c_str(), sizeof(addr.sun_path) - 1);
+            unlink(config_.transport.unix_socket_path.c_str());
 
             if (bind(unix_listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
                 listen(unix_listen_fd_, 16);
@@ -52,7 +65,7 @@ bool Reactor::init() {
         }
     }
 
-    if (config_.enable_tcp) {
+    if (config_.transport.enable_tcp) {
         tcp_listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (tcp_listen_fd_ >= 0) {
             set_nonblocking(tcp_listen_fd_);
@@ -61,8 +74,8 @@ bool Reactor::init() {
 
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
-            addr.sin_port = htons(config_.tcp_port);
-            inet_pton(AF_INET, config_.tcp_bind_ip.c_str(), &addr.sin_addr);
+            addr.sin_port = htons(config_.transport.tcp_port);
+            inet_pton(AF_INET, config_.transport.tcp_bind_ip.c_str(), &addr.sin_addr);
 
             if (bind(tcp_listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
                 listen(tcp_listen_fd_, 16);
@@ -85,10 +98,11 @@ void Reactor::stop() {
         if (s.fd >= 0) close(s.fd);
     }
     clients_.clear();
+    rule_connection_counts_.clear();
 
     if (unix_listen_fd_ >= 0) {
         close(unix_listen_fd_);
-        unlink(config_.unix_socket_path.c_str());
+        unlink(config_.transport.unix_socket_path.c_str());
         unix_listen_fd_ = -1;
     }
 
@@ -100,22 +114,106 @@ void Reactor::stop() {
     worker_.stop();
 }
 
-uint64_t Reactor::add_client_fd(int fd, bool is_unix, const std::string& addr) {
+uint64_t Reactor::add_client_fd(int fd, bool is_unix, const std::string& addr,
+                                const AccessRule* rule) {
     set_nonblocking(fd);
     uint64_t cid = next_client_id_++;
+
+    int rule_idx = rule ? static_cast<int>(rule - config_.access_rules.data()) : -1;
+
     ClientSession s;
     s.client_id = cid;
     s.fd = fd;
     s.is_unix_socket = is_unix;
     s.remote_addr = addr;
-    s.default_priority = 100;
+    s.rule = rule;
+    s.rule_index = rule_idx;
+    s.configured_priority = rule ? rule->priority : 100;
+    s.rate_tokens = config_.command_rate_limit > 0
+                        ? static_cast<double>(config_.command_rate_limit)
+                        : 0;
+    s.rate_refill_time = std::chrono::steady_clock::now();
     clients_[cid] = std::move(s);
+
+    if (rule_idx >= 0) {
+        rule_connection_counts_[rule_idx]++;
+    }
     return cid;
+}
+
+void Reactor::reject_connection(int fd, const char* reason) {
+    std::string msg = std::string("ERR 0 AUTH_FAILED reason=") + reason + "\n";
+    ssize_t n = write(fd, msg.data(), msg.size());
+    (void)n;
+    close(fd);
+}
+
+bool Reactor::authorize_and_add(int fd, bool is_unix, const sockaddr_storage& peer, socklen_t peer_len) {
+    set_nonblocking(fd);
+
+    std::string addr_str = is_unix ? "local" : "tcp";
+    if (!is_unix && peer.ss_family == AF_INET) {
+        char buf[INET_ADDRSTRLEN] = {0};
+        const auto* sin = reinterpret_cast<const sockaddr_in*>(&peer);
+        inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
+        addr_str = buf;
+    }
+
+    if (config_.max_total_connections > 0 &&
+        clients_.size() >= static_cast<size_t>(config_.max_total_connections)) {
+        reject_connection(fd, "server_limit");
+        return false;
+    }
+
+    const AccessRule* rule = match_access_rule(config_, peer, peer_len, is_unix);
+    if (!rule) {
+        reject_connection(fd, "no_matching_rule");
+        return false;
+    }
+
+    int rule_idx = static_cast<int>(rule - config_.access_rules.data());
+    if (rule->max_connections > 0 && rule_connection_counts_[rule_idx] >= rule->max_connections) {
+        reject_connection(fd, "connection_limit");
+        return false;
+    }
+
+    add_client_fd(fd, is_unix, addr_str, rule);
+    return true;
+}
+
+bool Reactor::consume_command_token(ClientSession& session) {
+    int rate = config_.command_rate_limit;
+    if (rate <= 0) return true;
+
+    auto now = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(now - session.rate_refill_time).count();
+    session.rate_refill_time = now;
+    session.rate_tokens = std::min<double>(rate, session.rate_tokens + elapsed * rate);
+    if (session.rate_tokens >= 1.0) {
+        session.rate_tokens -= 1.0;
+        return true;
+    }
+    return false;
+}
+
+bool Reactor::consume_hw_read_token() {
+    int rate = config_.hardware_read_rate_limit;
+    if (rate <= 0) return true;
+
+    auto now = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(now - hw_read_refill_time_).count();
+    hw_read_refill_time_ = now;
+    hw_read_tokens_ = std::min<double>(rate, hw_read_tokens_ + elapsed * rate);
+    if (hw_read_tokens_ >= 1.0) {
+        hw_read_tokens_ -= 1.0;
+        return true;
+    }
+    return false;
 }
 
 void Reactor::run() {
     while (running_) {
-        poll_once(config_.scheduler_interval_ms);
+        poll_once(config_.transport.scheduler_interval_ms);
     }
 }
 
@@ -134,10 +232,15 @@ void Reactor::poll_once(int timeout_ms) {
 
     std::vector<uint64_t> client_ids;
     for (const auto& [cid, s] : clients_) {
-        short events = POLLIN;
-        if (!s.send_buffer.empty()) {
-            events |= POLLOUT;
-        }
+        // Backpressure: keep reading from every client (input is bounded by
+        // recv_buffer and the TCP window) and watch for POLLOUT only while
+        // responses are queued, so the queue can drain as the reader consumes
+        // output. A reader that never consumes output keeps the queue growing
+        // until it overflows kMaxQueuedOutput and the session is dropped
+        // (see send_response). Registering POLLOUT unconditionally would make
+        // poll() return immediately for every idle-but-writable client,
+        // starving the scheduler's time-based ticks and burning CPU.
+        short events = POLLIN | (s.send_buffer.empty() ? 0 : POLLOUT);
         pfds.push_back(pollfd{s.fd, events, 0});
         client_ids.push_back(cid);
     }
@@ -186,20 +289,13 @@ void Reactor::poll_once(int timeout_ms) {
 }
 
 void Reactor::handle_listener(int listen_fd, bool is_unix) {
-    sockaddr_storage ss{};
-    socklen_t slen = sizeof(ss);
-    int client_fd = accept(listen_fd, reinterpret_cast<sockaddr*>(&ss), &slen);
-    if (client_fd < 0) return;
-
-    std::string addr_str = is_unix ? "unix" : "tcp";
-    if (!is_unix && ss.ss_family == AF_INET) {
-        char buf[INET_ADDRSTRLEN] = {0};
-        auto* sin = reinterpret_cast<sockaddr_in*>(&ss);
-        inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
-        addr_str = buf;
+    for (int i = 0; i < 64; ++i) {
+        sockaddr_storage ss{};
+        socklen_t slen = sizeof(ss);
+        int client_fd = accept(listen_fd, reinterpret_cast<sockaddr*>(&ss), &slen);
+        if (client_fd < 0) return;
+        authorize_and_add(client_fd, is_unix, ss, slen);
     }
-
-    add_client_fd(client_fd, is_unix, addr_str);
 }
 
 void Reactor::handle_worker_wakeup() {
@@ -241,7 +337,7 @@ void Reactor::on_scheduler_tick() {
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick_time_).count();
 
-    if (elapsed >= config_.scheduler_interval_ms) {
+    if (elapsed >= config_.transport.scheduler_interval_ms) {
         last_tick_time_ = now;
         if (scheduler_.has_dirty()) {
             auto batch = scheduler_.generate_batch();
@@ -351,6 +447,16 @@ void Reactor::disconnect_client(uint64_t client_id) {
         (void)write(it->second.fd, it->second.send_buffer.data(), it->second.send_buffer.size());
     }
 
+    int rule_idx = it->second.rule_index;
+    if (rule_idx >= 0) {
+        auto rit = rule_connection_counts_.find(rule_idx);
+        if (rit != rule_connection_counts_.end()) {
+            if (--rit->second == 0) {
+                rule_connection_counts_.erase(rit);
+            }
+        }
+    }
+
     auto released_leds = ownership_.release_client(client_id);
     for (auto id : released_leds) {
         scheduler_.apply_fallback(id);
@@ -384,6 +490,22 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
         }
     }
 
+    // Per-connection command rate limit (token bucket, burst = rate)
+    if (!consume_command_token(session)) {
+        send_response(session, Response::error(req.request_id, "RATE_LIMITED", {
+            {"reason", "command_rate"},
+        }));
+        return;
+    }
+
+    // Verb permission from the matched access rule
+    if (req.verb != Verb::Hello && !rule_allows_verb(session.rule, req.verb)) {
+        send_response(session, Response::error(req.request_id, "FORBIDDEN", {
+            {"verb", to_string(req.verb)},
+        }));
+        return;
+    }
+
     switch (req.verb) {
         case Verb::Hello: {
             session.authenticated = true;
@@ -412,9 +534,27 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
         }
 
         case Verb::Set: {
-            int prio = req.patch.priority.value_or(session.default_priority);
+            int prio = req.patch.priority.value_or(session.configured_priority);
+
+            // Priority ceiling: clients may not claim a priority strictly
+            // closer to 0 than their configured access rule allows.
+            if (req.patch.priority && *req.patch.priority < session.configured_priority) {
+                std::string led_str = req.target.is_all ? "all" : to_string(req.target.id);
+                send_response(session, Response::error(req.request_id, "FORBIDDEN", {
+                    {"led", led_str},
+                    {"reason", "priority"},
+                }));
+                return;
+            }
 
             if (req.target.is_all) {
+                if (!rule_allows_all_leds(session.rule, caps.supported_leds)) {
+                    send_response(session, Response::error(req.request_id, "FORBIDDEN", {
+                        {"led", "all"},
+                    }));
+                    return;
+                }
+
                 if (!ownership_.can_mutate_all(caps.supported_leds, session.client_id, prio)) {
                     Response err = Response::error(req.request_id, "REJECTED", {
                         {"led", "all"},
@@ -443,6 +583,13 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                         {"led", to_string(req.target.id)},
                     });
                     send_response(session, err);
+                    return;
+                }
+
+                if (!rule_allows_led(session.rule, req.target.id)) {
+                    send_response(session, Response::error(req.request_id, "FORBIDDEN", {
+                        {"led", to_string(req.target.id)},
+                    }));
                     return;
                 }
 
@@ -478,6 +625,13 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 return;
             }
 
+            if (!rule_allows_led(session.rule, req.target.id)) {
+                send_response(session, Response::error(req.request_id, "FORBIDDEN", {
+                    {"led", to_string(req.target.id)},
+                }));
+                return;
+            }
+
             if (req.source == "desired") {
                 auto st = scheduler_.get_desired(req.target.id);
                 Response resp = Response::ok(req.request_id, "GET", {
@@ -505,6 +659,12 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 });
                 send_response(session, resp);
             } else if (req.source == "hardware") {
+                if (!consume_hw_read_token()) {
+                    send_response(session, Response::error(req.request_id, "RATE_LIMITED", {
+                        {"reason", "hardware_read"},
+                    }));
+                    return;
+                }
                 worker_.submit_read(HardwareReadRequest{session.client_id, req.request_id, req.target.id});
             }
             break;
@@ -527,7 +687,14 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                     return;
                 }
 
-                if (!ownership_.can_reset(req.target.id, session.client_id, session.default_priority)) {
+                if (!rule_allows_led(session.rule, req.target.id)) {
+                    send_response(session, Response::error(req.request_id, "FORBIDDEN", {
+                        {"led", to_string(req.target.id)},
+                    }));
+                    return;
+                }
+
+                if (!ownership_.can_reset(req.target.id, session.client_id, session.configured_priority)) {
                     Response err = Response::error(req.request_id, "REJECTED", {
                         {"led", to_string(req.target.id)},
                         {"reason", "priority"},
@@ -536,7 +703,7 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                     return;
                 }
 
-                ownership_.reset(req.target.id, session.client_id, session.default_priority);
+                ownership_.reset(req.target.id, session.client_id, session.configured_priority);
                 scheduler_.apply_fallback(req.target.id);
                 Response resp = Response::ok(req.request_id, "RESET");
                 send_response(session, resp);

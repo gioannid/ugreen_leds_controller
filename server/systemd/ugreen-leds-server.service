@@ -1,0 +1,38 @@
+[Unit]
+Description=UGREEN LED network service (ugreen_leds_server)
+After=network.target
+
+[Service]
+Type=simple
+# Dedicated service account; grant it access to the I2C device node only.
+User=ugreen-leds
+Group=ugreen-leds
+ExecStart=/usr/local/bin/ugreen_leds_server --config /etc/ugreen-leds/ugreen-leds-server.conf
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+UMask=0077
+RuntimeDirectory=ugreen-leds
+
+# The I2C bus number is host specific. Determine it at deployment time
+# (i2cdetect -l / i2cscan) and set the matching node below; do not assume
+# the example bus number from the README.
+DeviceAllow=/dev/i2c-0 rw
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
