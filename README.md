@@ -3,7 +3,7 @@ LED Controller for UGREEN's DX/DXP NAS Series
 
 ## LED Network Server (this fork)
 
-This fork adds an experimental **LED network service** in [`server/`](server/), an independent daemon that exposes the front-panel LEDs over a Unix domain socket and TCP using a line-delimited protocol (Protocol v1; see [`server/ARCHITECTURE.md`](server/ARCHITECTURE.md) for the full design). It is intended to let multiple monitoring agents (disk I/O, network activity, storage health, ...) own and drive individual LEDs with priority-based arbitration.
+This fork adds an experimental **LED network service** in [`server/`](server/), an independent daemon that exposes the front-panel LEDs over a Unix domain socket and TCP using a line-delimited protocol (Protocol v1; see [`server/PROTOCOL.md`](server/PROTOCOL.md) for the client-facing protocol reference and [`server/ARCHITECTURE.md`](server/ARCHITECTURE.md) for the full design). It is intended to let multiple monitoring agents (disk I/O, network activity, storage health, ...) own and drive individual LEDs with priority-based arbitration.
 
 ### Implemented (stages 1–3)
 
@@ -12,14 +12,17 @@ This fork adds an experimental **LED network service** in [`server/`](server/), 
 - **Multi-client ownership** — implicit LED ownership on mutation, priority-based preemption (values strictly closer to 0 win), atomic multi-LED operations, `RESET` and disconnect release with per-LED fallback states
 - **Remote client access control** — config-file access rules (IPv4/IPv6 CIDR or `local`), per-rule LED subsets, verb restrictions, priority ceilings, per-rule and server-wide connection caps, per-connection command rate limit, server-wide hardware-read rate limit; unmatched peers are denied before `HELLO`
 - **Backpressure and bounded buffers** — 1 KiB line / 8 KiB recv / 32 KiB send queue per session; a client that never reads responses is disconnected while the service stays responsive
+- **Logging** — leveled logging with ISO-8601 UTC timestamps: info-level events (connections, authorization, hardware failures) are on by default for production observability; `--verbose` adds debug-level detail for troubleshooting. Output goes to the screen (stdout, captured by the journal) by default, or to a file with `--log-file` (also configurable in the INI config via `log_file` / `verbose`)
 - **Deployment** — INI config (see [`server/examples/ugreen-leds-server.conf`](server/examples/ugreen-leds-server.conf)), single-instance `flock`, graceful shutdown, hardened systemd unit ([`server/systemd/ugreen-leds-server.service`](server/systemd/ugreen-leds-server.service))
-- **Tests** — 52 unit/integration/stress tests in `server/` (including 1000-connection churn with a memory-growth check and a hardware failure storm)
+- **Tests** — 60 unit/integration/stress tests in `server/` (including 1000-connection churn with a memory-growth check and a hardware failure storm)
 
 ```bash
 cd server
 make && make test     # build and run the full test suite
 ./ugreen_leds_server  # development mode: fake backend, local + loopback access only
 ./ugreen_leds_server --config /path/to/ugreen-leds-server.conf
+./ugreen_leds_server --verbose          # debug-level logging to the screen
+./ugreen_leds_server --log-file /var/log/ugreen-leds-server.log   # log to a file
 ```
 
 ### Not yet available
