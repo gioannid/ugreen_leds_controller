@@ -380,3 +380,135 @@ S: ERR 8 FORBIDDEN led=disk2 reason=priority
 C: SET 9 disk2 brightness=99 priority=20
 S: OK 9 ACCEPTED generation=7
 ```
+
+## 12. Scripting clients (no custom code)
+
+The protocol is line-oriented ASCII over a plain stream socket, so any
+command-line tool that can write lines to a TCP port is a valid client — no
+SDK or compiled client is needed. The examples below target the **TCP
+transport** (`127.0.0.1:39001` by default, or the configured remote bind
+address from another machine, [§1](#1-transports-and-endpoints)), which is the
+interface most connections use. The Unix socket exists for local convenience
+only and is not required for any of the patterns below.
+
+Two protocol facts shape every scripting pattern:
+
+- Each connection must start with `HELLO <id> 1` ([§4](#4-session-lifecycle)),
+  so each one-shot invocation opens a fresh connection and re-handles the
+  whole handshake.
+- **Ownership is per-connection and released on disconnect**
+  ([§7](#7-ownership-and-priority)): when a one-shot script exits, its LEDs
+  revert to the configured fallback state. A script that must *leave* a state
+  visible either keeps its connection alive (e.g. `sleep` before exiting) or
+  is structured as a periodic job that re-asserts the state.
+
+**`curl` cannot speak this protocol.** `curl` always transmits an HTTP
+request, which the server parses as unknown commands (`ERR …
+UNKNOWN_COMMAND verb=GET`, `INVALID_ARGUMENT field=request_id`, …). Use
+`socat` or `nc` for one-shot scripting instead.
+
+### 12.1 One-shot batch with `socat` (recommended)
+
+```bash
+printf 'HELLO 1 1\nCAPS 2\nSET 3 disk1 mode=on rgb=0,255,0 brightness=128\nFLUSH 4\n' \
+  | socat -t 1 - TCP:127.0.0.1:39001
+```
+
+`-t 1` makes socat close one second after the last received byte, so the
+command prints the responses and exits:
+
+```text
+OK 1 HELLO version=1 access=127.0.0.1
+OK 2 CAPS version=1 leds=power,netdev,disk1,disk2,disk3,disk4 modes=off,on,blink,breath
+OK 3 ACCEPTED generation=1
+OK 4 FLUSH
+```
+
+From another machine, substitute the NAS's LAN address:
+`socat -t 1 - TCP:192.168.178.20:39001`.
+
+### 12.2 One-shot batch with `nc`
+
+Some `nc` variants exit on stdin EOF before printing responses; keeping the
+pipe open for a short `sleep` sidesteps that:
+
+```bash
+{ printf 'HELLO 1 1\nCAPS 2\nSET 3 disk1 mode=on\n'; sleep 1; } \
+  | nc 127.0.0.1 39001
+```
+
+### 12.3 Interactive session
+
+```bash
+nc 127.0.0.1 39001          # or: socat - TCP:127.0.0.1:39001
+```
+
+Type commands by hand and read the responses; `HELLO 1 1` first. `client.sh`
+in this directory wraps the Unix-socket equivalent through an SSH session on
+the NAS.
+
+### 12.4 Bash built-in `/dev/tcp`
+
+No tools needed at all — Bash opens the TCP connection itself. Responses
+arrive in command order, one line each:
+
+```bash
+exec 3<>/dev/tcp/127.0.0.1/39001
+printf 'HELLO 1 1\n' >&3
+read -r -t 2 line <&3 || { echo "HELLO failed: $line" >&2; exit 1; }
+printf 'CAPS 2\n' >&3
+read -r -t 2 line <&3 && echo "$line"
+printf 'SET 3 disk1 mode=blink on_ms=100 off_ms=100\n' >&3
+read -r -t 2 line <&3 && echo "$line"
+sleep 600        # keep the connection open: ownership (and the LED state)
+exec 3>&-        # lasts only while connected; closing releases the fallback
+```
+
+### 12.5 Python 3 script
+
+```python
+import socket
+
+s = socket.create_connection(("127.0.0.1", 39001))   # or ("192.168.178.20", 39001)
+r = s.makefile()
+
+def send(*tokens):
+    s.sendall((" ".join(map(str, tokens)) + "\n").encode())
+    return r.readline().strip()
+
+print(send("HELLO", 1, 1))
+print(send("CAPS", 2))
+print(send("SET", 3, "disk1", "mode=on", "rgb=0,255,0", "brightness=128"))
+print(send("FLUSH", 4))
+# import time; time.sleep(600)   # stay alive to keep the LED state
+```
+
+### 12.6 PowerShell (Windows clients)
+
+```powershell
+$c = New-Object Net.Sockets.TcpClient('192.168.178.20', 39001)
+$w = New-Object IO.StreamWriter($c.GetStream())
+$r = New-Object IO.StreamReader($c.GetStream())
+function Send([string[]]$t) { $w.WriteLine($t -join ' '); $w.Flush(); $r.ReadLine() }
+Send 'HELLO','1','1'
+Send 'CAPS','2'
+Send 'SET','3','disk1','mode=on'
+Send 'FLUSH','4'
+# Start-Sleep -Seconds 600   # stay alive to keep the LED state
+```
+
+`WriteLine` emits CRLF, which the protocol accepts
+([§2](#2-framing-and-limits)).
+
+### 12.7 When to write a real client instead
+
+- One-shot tools are fine for occasional commands and short batches; they must
+  re-`HELLO` and re-assert state on every run, and their LED state dies with
+  the process.
+- High-frequency agents (disk activity, I/O rates) must **not** spawn a
+  process per update: keep one persistent connection
+  ([§10.7](#10-client--agent-implementation-notes)) and send deltas — see
+  [examples/client.cpp](examples/client.cpp).
+- If a script streams many `reply=none` updates, it still has to keep reading
+  the socket: errors are never suppressed and an un-drained send queue gets the
+  connection dropped ([§10.2](#10-client--agent-implementation-notes)).
