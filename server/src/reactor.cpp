@@ -647,7 +647,8 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
 
                 // SET all is atomic: the cycle must be valid against the
                 // current state of every target LED (a single-field update
-                // can overflow the 16-bit cycle against a retained field).
+                // can overflow the 16-bit cycle against a retained field or
+                // resolve to a zero half-cycle).
                 std::string cycle_err;
                 for (auto led : caps.supported_leds) {
                     if (!validate_patch_cycle(scheduler_.get_desired(led), req.patch, &cycle_err)) {
@@ -698,8 +699,9 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                 // State-dependent cycle validation: the parser can only check
                 // an on_ms/off_ms pair within one SET, but a single-field
                 // update may still overflow the 16-bit cycle against the
-                // retained value (or enter a zero cycle). Reject before the
-                // SET acquires ownership.
+                // retained value or resolve to a zero half-cycle (which the
+                // chip rejects in blink/breath). Reject before the SET
+                // acquires ownership.
                 std::string cycle_err;
                 if (!validate_patch_cycle(scheduler_.get_desired(req.target.id), req.patch, &cycle_err)) {
                     log::debug("client " + std::to_string(session.client_id) + ": SET " +

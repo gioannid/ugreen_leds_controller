@@ -248,7 +248,7 @@ Supported fields:
 | `off_ms` | Blink/breath off duration |
 | `priority` | Integer priority; closer to 0 denotes higher priority (must not exceed configured access ceiling) |
 
-The documented CLI accepts 16-bit timing arguments, while the controller protocol encodes total cycle duration and on duration as 16-bit values. Validate the combined cycle in a wider integer type and reject unrepresentable values rather than allowing wraparound. Exact zero-duration behavior must be verified against the backend before implementation.
+The documented CLI accepts 16-bit timing arguments, while the controller protocol encodes total cycle duration and on duration as 16-bit values. Validate the combined cycle in a wider integer type and reject unrepresentable values rather than allowing wraparound. Zero-duration behavior was verified against the chip: it rejects blink/breath commands with a zero `on_ms` or a zero `off_ms`, so the server rejects any resolved blink/breath state with a zero half-cycle (`INVALID_ARGUMENT field=on_ms`) before it reaches the hardware.
 
 `RESET <request-id> <target>` releases ownership of the target LED (or all owned LEDs if `all`), resets desired state to configured fallback, and allows other connections to take control.
 

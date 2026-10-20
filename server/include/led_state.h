@@ -113,7 +113,8 @@ std::string to_string(const RgbColor& color);
 
 // Timing constraint validation:
 // 16-bit cycle limit: on_ms + off_ms must not exceed 65535 to prevent 16-bit wraparound.
-// When mode is Blink or Breath, total cycle must be > 0.
+// When mode is Blink or Breath, the cycle must be fully non-zero: the chip
+// rejects blink/breath commands with on_ms == 0 or off_ms == 0.
 bool validate_cycle_timing(uint16_t on_ms, uint16_t off_ms, OpMode mode = OpMode::Blink, std::string* error_field = nullptr);
 
 // Mode/timing transition semantics — the single source of truth shared by
@@ -139,7 +140,8 @@ LedState normalize_led_state(const LedState& s);
 
 // Validates the cycle a patch would produce given the current state. Unlike
 // the stateless parser check, this also covers single-field updates whose
-// sum with the retained field would overflow the 16-bit cycle.
+// sum with the retained field would overflow the 16-bit cycle or resolve to
+// a zero half-cycle (which the chip rejects in blink/breath).
 bool validate_patch_cycle(const LedState& current, const LedPatch& patch, std::string* error_field = nullptr);
 
 } // namespace ugreen

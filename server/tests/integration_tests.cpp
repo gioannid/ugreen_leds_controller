@@ -262,6 +262,32 @@ void run_integration_tests() {
         TEST_ASSERT_EQ(cmd("SET 22 disk1 mode=blink on_ms=0 off_ms=0"),
                        "ERR 22 INVALID_ARGUMENT field=on_ms");
 
+        // Step 7: a zero half-cycle must be rejected — the chip rejects
+        // blink/breath commands with on_ms=0 or off_ms=0. Both fields (parser
+        // level) and single fields resolving to a zero half against the
+        // retained value (state-dependent).
+        TEST_ASSERT_EQ(cmd("SET 23 disk1 mode=blink on_ms=0 off_ms=5000"),
+                       "ERR 23 INVALID_ARGUMENT field=on_ms");
+        TEST_ASSERT_EQ(cmd("SET 24 disk1 mode=blink on_ms=5000 off_ms=0"),
+                       "ERR 24 INVALID_ARGUMENT field=on_ms");
+        TEST_ASSERT_EQ(cmd("SET 25 disk1 on_ms=0"),
+                       "ERR 25 INVALID_ARGUMENT field=on_ms");
+        TEST_ASSERT_EQ(cmd("SET 26 disk1 off_ms=0"),
+                       "ERR 26 INVALID_ARGUMENT field=on_ms");
+        de = cmd("GET 27 disk1 source=desired");
+        TEST_ASSERT(de.find("on_ms=120") != std::string::npos);
+        TEST_ASSERT(de.find("off_ms=80") != std::string::npos);
+
+        // Step 8: the canonical live failure — a single off_ms update while
+        // mode=on resolves to blink(0, off) and must be rejected before any
+        // state or ownership change.
+        TEST_ASSERT(cmd("SET 28 disk1 mode=on").rfind("OK 28 ACCEPTED", 0) == 0);
+        TEST_ASSERT_EQ(cmd("FLUSH 29"), "OK 29 FLUSH");
+        TEST_ASSERT_EQ(cmd("SET 30 disk1 off_ms=15000"),
+                       "ERR 30 INVALID_ARGUMENT field=on_ms");
+        de = cmd("GET 31 disk1 source=desired");
+        TEST_ASSERT(de.find("mode=on") != std::string::npos);
+
         close(client_fd);
         reactor.stop();
         unlink(sock_path.c_str());

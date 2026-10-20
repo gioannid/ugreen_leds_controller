@@ -43,8 +43,9 @@ std::string describe_controller_op(const ControllerOp& op);
 std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatch& patch);
 
 // Checks whether a post-apply readback matches the state the plan intended
-// (off/on readbacks may retain stale cycle registers, so timing is only
-// compared for animation modes). Pure function.
+// (off mode: only the mode is verifiable; off/on readbacks may retain stale
+// cycle registers, so timing is only compared for animation modes). Pure
+// function.
 bool states_match_after_apply(const LedState& expected, const LedState& actual);
 
 // Human-readable single-line description of a state (logs/tests).

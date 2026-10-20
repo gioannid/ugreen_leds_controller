@@ -117,7 +117,11 @@ bool validate_cycle_timing(uint16_t on_ms, uint16_t off_ms, OpMode mode, std::st
         if (error_field) *error_field = "on_ms";
         return false;
     }
-    if ((mode == OpMode::Blink || mode == OpMode::Breath) && total_cycle == 0) {
+    // The chip rejects blink/breath commands with a zero half-cycle, so in
+    // animation modes both on_ms and off_ms must be non-zero (which also
+    // covers the zero-total case).
+    if ((mode == OpMode::Blink || mode == OpMode::Breath) &&
+        (total_cycle == 0 || on_ms == 0 || off_ms == 0)) {
         if (error_field) *error_field = "on_ms";
         return false;
     }
@@ -181,7 +185,11 @@ bool validate_patch_cycle(const LedState& current, const LedPatch& patch, std::s
     LedState target = resolve_target_state(current, patch);
     if (is_animation_mode(target.mode)) {
         uint32_t total = static_cast<uint32_t>(target.on_ms) + target.off_ms;
-        if (total > 65535) {
+        // The chip rejects a zero half-cycle, so both halves of the resolved
+        // cycle must be non-zero (see validate_cycle_timing). This catches
+        // single-field updates that resolve to a zero half against the
+        // retained field.
+        if (total > 65535 || target.on_ms == 0 || target.off_ms == 0) {
             if (error_field) *error_field = "on_ms";
             return false;
         }

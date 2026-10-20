@@ -253,8 +253,37 @@ void run_i2c_backend_tests() {
         LedState off_expected = make_state(OpMode::Off, 128, RgbColor{1, 2, 3});
         LedState off_retained = make_state(OpMode::Off, 128, RgbColor{1, 2, 3}, 250, 250);
         TEST_ASSERT(states_match_after_apply(off_expected, off_retained));
-        LedState off_wrong_color = make_state(OpMode::Off, 128, RgbColor{9, 9, 9}, 250, 250);
-        TEST_ASSERT(!states_match_after_apply(off_expected, off_wrong_color));
+
+        // Off mode: zero color/brightness targets are not verifiable (the
+        // chip ignores them), but non-zero targets must converge.
+        LedState off_zero_bright = make_state(OpMode::Off, 0, RgbColor{1, 2, 3});
+        LedState off_retained_bright = make_state(OpMode::Off, 200, RgbColor{1, 2, 3});
+        TEST_ASSERT(states_match_after_apply(off_zero_bright, off_retained_bright));
+        LedState off_nonzero_bright = make_state(OpMode::Off, 128, RgbColor{1, 2, 3});
+        LedState off_wrong_bright = make_state(OpMode::Off, 0, RgbColor{1, 2, 3});
+        TEST_ASSERT(!states_match_after_apply(off_nonzero_bright, off_wrong_bright));
+        LedState off_wrong_mode = make_state(OpMode::On, 128, RgbColor{1, 2, 3});
+        TEST_ASSERT(!states_match_after_apply(off_expected, off_wrong_mode));
+
+        // On mode: same rules as off — zero targets not verifiable, non-zero
+        // must converge.
+        LedState on_expected = make_state(OpMode::On, 128, RgbColor{1, 2, 3});
+        LedState on_wrong_color = make_state(OpMode::On, 128, RgbColor{9, 9, 9});
+        TEST_ASSERT(!states_match_after_apply(on_expected, on_wrong_color));
+        LedState on_zero_bright = make_state(OpMode::On, 0, RgbColor{1, 2, 3});
+        LedState on_retained_bright = make_state(OpMode::On, 200, RgbColor{1, 2, 3});
+        TEST_ASSERT(states_match_after_apply(on_zero_bright, on_retained_bright));
+        LedState on_nonzero_bright = make_state(OpMode::On, 100, RgbColor{1, 2, 3});
+        LedState on_wrong_bright = make_state(OpMode::On, 0, RgbColor{1, 2, 3});
+        TEST_ASSERT(!states_match_after_apply(on_nonzero_bright, on_wrong_bright));
+
+        // Blink/breath: full state comparison including timing.
+        LedState blink_expected = make_state(OpMode::Blink, 128, RgbColor{1, 2, 3}, 250, 250);
+        LedState blink_wrong_cycle = make_state(OpMode::Blink, 128, RgbColor{1, 2, 3}, 100, 250);
+        TEST_ASSERT(!states_match_after_apply(blink_expected, blink_wrong_cycle));
+        LedState blink_zero_bright = make_state(OpMode::Blink, 0, RgbColor{1, 2, 3}, 250, 250);
+        LedState blink_retained = make_state(OpMode::Blink, 200, RgbColor{1, 2, 3}, 250, 250);
+        TEST_ASSERT(!states_match_after_apply(blink_zero_bright, blink_retained));
     });
 
     test::run_test("controller op description is stable", []() {

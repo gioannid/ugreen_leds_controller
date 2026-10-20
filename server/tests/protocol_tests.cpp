@@ -156,6 +156,25 @@ void run_protocol_tests() {
         TEST_ASSERT(r2.status == ParseResult::Status::Error);
         TEST_ASSERT_EQ(r2.error_response->action, "INVALID_ARGUMENT");
 
+        // A zero half-cycle in blink/breath must be rejected (the chip
+        // rejects such commands)
+        auto r4 = ProtocolParser::parse_line("SET 110 disk1 mode=blink on_ms=0 off_ms=5000");
+        TEST_ASSERT(r4.status == ParseResult::Status::Error);
+        TEST_ASSERT_EQ(r4.error_response->action, "INVALID_ARGUMENT");
+
+        auto r5 = ProtocolParser::parse_line("SET 111 disk1 mode=breath on_ms=5000 off_ms=0");
+        TEST_ASSERT(r5.status == ParseResult::Status::Error);
+        TEST_ASSERT_EQ(r5.error_response->action, "INVALID_ARGUMENT");
+
+        // Implied blink (no mode) with a zero half-cycle is rejected too
+        auto r6 = ProtocolParser::parse_line("SET 112 disk1 on_ms=0 off_ms=5000");
+        TEST_ASSERT(r6.status == ParseResult::Status::Error);
+        TEST_ASSERT_EQ(r6.error_response->action, "INVALID_ARGUMENT");
+
+        // In non-animation modes the timing is ignored, so a zero half is fine
+        auto r7 = ProtocolParser::parse_line("SET 113 disk1 mode=on on_ms=0 off_ms=5000");
+        TEST_ASSERT(r7.status == ParseResult::Status::Success);
+
         // Valid boundary 65535 sum
         auto r3 = ProtocolParser::parse_line("SET 109 disk1 on_ms=35535 off_ms=30000");
         TEST_ASSERT(r3.status == ParseResult::Status::Success);

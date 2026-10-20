@@ -134,10 +134,13 @@ Field rules:
 | `priority` | non-negative integer | see [Ownership and priority](#7-ownership-and-priority); omit to use your configured default |
 | `reply` | `none` | suppress the `OK ACCEPTED` response; **errors are still sent** |
 
-Timing validation (when both `on_ms` and `off_ms` are given): their sum must
-not exceed `65535` (the hardware encodes the full cycle in 16 bits), and if
-the effective mode is `blink` or `breath` (the given `mode`, or `blink` when
-`mode` is omitted) the sum must be greater than `0`. Violations produce
+Timing validation: the sum of `on_ms` and `off_ms` must not exceed `65535`
+(the hardware encodes the full cycle in 16 bits). When the effective mode is
+`blink` or `breath` (the given `mode`, or `blink` when `mode` is omitted),
+**both half-cycles must be non-zero**: the controller chip rejects blink or
+breath commands with `on_ms=0` or `off_ms=0`. This applies both when both
+fields are given in one `SET` and when a single-field update resolves to a
+zero half-cycle against the retained field. Violations produce
 `ERR <id> INVALID_ARGUMENT field=on_ms`.
 
 Semantics:
@@ -305,6 +308,14 @@ overflow) close the connection **without** an error line.
   invalidates the uncertain applied fields, and the scheduler retries on the
   next tick. `FLUSH` is the way to observe persistent failure
   (`HARDWARE_ERROR`).
+- **Zero color/brightness in off/on modes**: the controller acknowledges but
+  ignores zero-valued color/brightness updates while the LED is `off` or `on`
+  (the registers keep their previous value; verified on real hardware). Such
+  updates are accepted into the desired state but are **not retried** — the
+  value is re-programmed together with the next mode change to blink/breath,
+  which the chip does apply. Until then `GET source=applied` /
+  `GET source=hardware` may show the previous color/brightness while
+  `GET source=desired` shows the requested zero.
 - **Rate limits**: per-connection command rate (token bucket, burst = rate,
   default 500/s; `0` disables) and server-wide hardware-read rate (default
   10/s; `0` disables). Both are server configuration.

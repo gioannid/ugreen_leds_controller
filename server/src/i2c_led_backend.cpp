@@ -164,8 +164,9 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
                (target.on_ms != cur.on_ms || target.off_ms != cur.off_ms)) {
         // Same blink/breath mode with a changed cycle: re-issue the mode
         // command carrying the updated timing. The resolved target always
-        // carries a non-zero cycle in animation modes, so the command is
-        // always chip-legal.
+        // carries non-zero half-cycles in animation modes (zero halves are
+        // rejected at the protocol boundary), so the command is always
+        // chip-legal.
         ControllerOp op;
         op.type = (target.mode == OpMode::Blink)
                       ? ControllerOp::Type::SetBlink
@@ -180,20 +181,32 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
 
 // Post-apply verification: the chip acknowledged each command, but the
 // resulting state as a whole must still match what the plan intended. In
-// off/on modes only mode/color/brightness are compared — the chip retains
-// its cycle registers across off/on, so the readback timing there is not
-// meaningful.
+// off/on modes only the mode is compared — the chip acknowledges but ignores
+// zero-valued color/brightness updates in these modes (verified on real
+// hardware), so the readback registers are not verifiable for zero targets;
+// they are re-programmed with the next mode change to blink/breath. In
+// blink/breath modes the full state including timing is compared.
 bool states_match_after_apply(const LedState& expected, const LedState& actual) {
     if (!actual.valid || actual.mode != expected.mode) {
         return false;
     }
+    if (expected.mode == OpMode::Off || expected.mode == OpMode::On) {
+        // For non-zero targets the registers are verifiable; for zero
+        // targets the chip retains the previous value, so we cannot
+        // distinguish "applied" from "ignored" — accept both.
+        if (expected.brightness != 0 && actual.brightness != expected.brightness) {
+            return false;
+        }
+        bool expected_black = expected.rgb.r == 0 && expected.rgb.g == 0 && expected.rgb.b == 0;
+        if (!expected_black && actual.rgb != expected.rgb) {
+            return false;
+        }
+        return true;
+    }
     if (actual.rgb != expected.rgb || actual.brightness != expected.brightness) {
         return false;
     }
-    if (expected.mode == OpMode::Blink || expected.mode == OpMode::Breath) {
-        return actual.on_ms == expected.on_ms && actual.off_ms == expected.off_ms;
-    }
-    return true;
+    return actual.on_ms == expected.on_ms && actual.off_ms == expected.off_ms;
 }
 
 std::string describe_led_state(const LedState& s) {

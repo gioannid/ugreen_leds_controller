@@ -218,6 +218,13 @@ void run_config_tests() {
         ok = load_ok("[fallback]\nnonexistentled=mode=on\n", cfg, err);
         TEST_ASSERT(!ok);
 
+        // Zero half-cycle in a fallback blink/breath is not chip-representable
+        ok = load_ok("[fallback]\npower=mode=blink on_ms=0 off_ms=100\n", cfg, err);
+        TEST_ASSERT(!ok);
+
+        ok = load_ok("[fallback]\npower=mode=breath on_ms=100 off_ms=0\n", cfg, err);
+        TEST_ASSERT(!ok);
+
         ok = load_ok("[fallback]\n"
                      "power=mode=blink on_ms=100 off_ms=100\n"
                      "power=mode=on\n",
