@@ -78,7 +78,7 @@ int main(int argc, char* argv[]) {
                     << "  --interval <ms>     Scheduler interval in ms\n"
                     << "  --lock-file <path>  Process lock file to prevent duplicate instances\n"
                     << "  --log-file <path>   Write log messages to a file (default: screen)\n"
-                    << "  --backend <name>    LED backend: fake (simulator) or i2c (real hardware)\n"
+                    << "  --backend <name>    LED backend: i2c (real hardware, default) or fake (simulator)\n"
                     << "  --verbose           Enable debug-level logging for troubleshooting\n"
                     << "  --no-unix           Disable Unix socket listener\n"
                     << "  --no-tcp            Disable TCP listener\n"

@@ -344,9 +344,9 @@ void run_i2c_backend_tests() {
         TEST_ASSERT_EQ(cfg.backend, std::string("i2c"));
     });
 
-    test::run_test("config: defaults to fake backend", []() {
+    test::run_test("config: defaults to i2c backend", []() {
         ServerConfig cfg;
-        TEST_ASSERT_EQ(cfg.backend, std::string("fake"));
+        TEST_ASSERT_EQ(cfg.backend, std::string("i2c"));
     });
 
     test::run_test("config: reject unknown backend", []() {

@@ -155,7 +155,7 @@ The implementation follows the ARCHITECTURE.md design:
 - **Timing validation**: rejects `on_ms + off_ms > 65535` (16-bit cycle overflow), zero-cycle blink/breath, and zero half-cycles (the chip rejects blink/breath with `on_ms=0` or `off_ms=0`)
 - **Zero color/brightness rejection**: the chip acknowledges but ignores zero-valued color/brightness writes in every mode (verified on real hardware), so `brightness=0` and `rgb=0,0,0` are rejected at parse time (`INVALID_ARGUMENT field=brightness` / `field=rgb`) and in `[fallback]` config validation; `LedState` defaults and the built-in fallback use the chip's representable power-on values (off, red, brightness 200)
 - **Single copy of the controller code, unmodified**: the server compiles `cli/i2c.cpp` and `cli/ugreen_leds.cpp` directly (objects `cli_i2c.o`, `cli_ugreen_leds.o`); `I2cLedBackend` wraps `ugreen_leds_t` as-is and keeps no copies of the wire protocol. The `cli/` sources are untouched, so the legacy CLI carries zero regression risk from the server.
-- **Two hardware paths, one interface**: `FakeLedBackend` (default, development) and `I2cLedBackend` (real HW, `backend=i2c`) both satisfy the `LedBackend` interface; the reactor, scheduler, ownership, and worker code is backend-agnostic.
+- **Two hardware paths, one interface**: `I2cLedBackend` (default, real HW, `backend=i2c`) and `FakeLedBackend` (development simulator, `backend=fake`) both satisfy the `LedBackend` interface; the reactor, scheduler, ownership, and worker code is backend-agnostic.
 
 ### Stage 3 behavior
 
@@ -170,7 +170,7 @@ The implementation follows the ARCHITECTURE.md design:
 
 ### Stage 4 behavior
 
-- **Backend selection**: `backend=fake` (default) keeps the development behavior (simulator, real hardware untouched, startup warning); `backend=i2c` opens the real controller and the server refuses to start when the controller cannot be opened or reports zero LEDs.
+- **Backend selection**: `backend=i2c` (default) opens the real controller and the server refuses to start when the controller cannot be opened or reports zero LEDs; `backend=fake` keeps the development behavior (simulator, real hardware untouched, startup warning).
 - **Fail-fast with diagnostics**: missing adapter, missing device node, and chip-not-present all produce a distinct `HardwareException` message (with the `errno` text) that is logged at startup.
 - **Ownership of I/O**: all controller reads/writes happen on the hardware worker thread; `capabilities()` returns the constructor-time probe cache, so the reactor can serve CAPS without touching the bus.
 - **Verification semantics**: a batch is "applied" only when every command was acknowledged by the chip's result register; otherwise the existing error_generation/retry machinery applies.

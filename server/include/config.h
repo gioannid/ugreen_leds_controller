@@ -58,8 +58,8 @@ struct ServerConfig {
     std::string log_file;                // log target file, empty = screen (stdout)
     bool verbose = false;                // enable debug-level logging (troubleshooting)
 
-    // LED backend: "fake" (in-memory simulator) or "i2c" (real hardware).
-    std::string backend = "fake";
+    // LED backend: "i2c" (real hardware, default) or "fake" (in-memory simulator).
+    std::string backend = "i2c";
 
     ServerConfig() = default;
     // Allows constructing a transport-only config (development default:

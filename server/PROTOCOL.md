@@ -352,7 +352,7 @@ overflow) close the connection **without** an error line.
 
 ## 11. Example session
 
-Unix socket, development defaults (fake backend, permissive local policy):
+Unix socket, development setup (`--backend fake`, permissive local policy):
 
 ```text
 C: HELLO 1 1
