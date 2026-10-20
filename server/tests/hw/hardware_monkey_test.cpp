@@ -175,26 +175,14 @@ void default_cycle_for(const std::string& mode, int& on, int& off) {
     }
 }
 
-// The chip acknowledges but ignores zero-valued color/brightness updates in
-// off/on modes (verified on real hardware), so a zero target is retained as
-// the physical value. Returns the expected chip state after applying p (the
-// logical desired state takes the zero; the hardware keeps the previous
-// value).
-State physical_after(const State& physical, const State& after) {
-    State out = after;
-    if (after.mode == "off" || after.mode == "on") {
-        if (after.brightness == 0) out.brightness = physical.brightness;
-        if (after.rgb == "0,0,0") out.rgb = physical.rgb;
-    }
-    return out;
-}
-
 // Resolves a patch against the current expected state, mirroring the server
 // contract:
-//   * parser: when both on_ms and off_ms are present, the sum must be <=
-//     65535, and both halves must be non-zero when the effective mode is
-//     blink/breath (the effective mode is the given mode, or blink when mode
-//     is omitted);
+//   * parser: brightness must be non-zero and rgb must not be black (the
+//     chip acknowledges but ignores zero-valued color/brightness writes, so
+//     they are not settable); when both on_ms and off_ms are present, the
+//     sum must be <= 65535, and both halves must be non-zero when the
+//     effective mode is blink/breath (the effective mode is the given mode,
+//     or blink when mode is omitted);
 //   * server: a single-field update must not push the resolved cycle over
 //     65535 against the retained field, nor resolve to a zero half-cycle
 //     (the chip rejects blink/breath with on_ms == 0 or off_ms == 0);
@@ -202,10 +190,26 @@ State physical_after(const State& physical, const State& after) {
 //     from a different mode without explicit timing uses the mode's default
 //     cycle; a zero cycle in blink/breath falls back to the default cycle;
 //     off/on states carry no active cycle.
-// Returns false (and sets *rejected) when the server must reject the SET.
-bool resolve_patch(const State& cur, const Patch& p, State& out, bool* rejected) {
+// Returns false (and sets *rejected/*error_field) when the server must
+// reject the SET.
+bool resolve_patch(const State& cur, const Patch& p, State& out, bool* rejected,
+                   std::string* error_field) {
     *rejected = false;
+    if (error_field) *error_field = "";
     out = cur;
+
+    // Zero color/brightness is not settable (the chip keeps the current
+    // value), so the server must reject it outright.
+    if (p.brightness && *p.brightness == 0) {
+        *rejected = true;
+        if (error_field) *error_field = "brightness";
+        return false;
+    }
+    if (p.rgb && *p.rgb == "0,0,0") {
+        *rejected = true;
+        if (error_field) *error_field = "rgb";
+        return false;
+    }
 
     const bool timing_given = p.on_ms.has_value() || p.off_ms.has_value();
     std::string m = p.mode ? *p.mode : cur.mode;
@@ -225,6 +229,7 @@ bool resolve_patch(const State& cur, const Patch& p, State& out, bool* rejected)
             ((eff == "blink" || eff == "breath") &&
              (sum == 0 || *p.on_ms == 0 || *p.off_ms == 0))) {
             *rejected = true;
+            if (error_field) *error_field = "on_ms";
             return false;
         }
     }
@@ -250,6 +255,7 @@ bool resolve_patch(const State& cur, const Patch& p, State& out, bool* rejected)
     if ((m == "blink" || m == "breath") &&
         (on + off > 65535 || on == 0 || off == 0)) {
         *rejected = true;
+        if (error_field) *error_field = "on_ms";
         return false;
     }
 
@@ -296,17 +302,23 @@ Patch make_random_patch(const State& /*exp*/, std::mt19937& rng) {
     std::uniform_int_distribution<int> d01(0, 99);
     Patch p;
 
-    // ~5% deliberately invalid (zero cycle or 16-bit overflow): the server
-    // must reject them and leave the state untouched.
+    // ~5% deliberately invalid (zero/overflow cycle, zero brightness or
+    // black color): the server must reject them and leave the state
+    // untouched.
     if (d01(rng) < 5) {
-        if (d01(rng) < 50) {
+        int kind = d01(rng);
+        if (kind < 25) {
             p.mode = "blink";
             p.on_ms = 0;
             p.off_ms = 0;
-        } else {
+        } else if (kind < 50) {
             p.mode = "breath";
             p.on_ms = 60000;
             p.off_ms = 10000;
+        } else if (kind < 75) {
+            p.brightness = 0;
+        } else {
+            p.rgb = "0,0,0";
         }
         return p;
     }
@@ -317,12 +329,20 @@ Patch make_random_patch(const State& /*exp*/, std::mt19937& rng) {
     if (d01(rng) < 45) {
         p.rgb = pick(rng, rgb_palette());
     } else if (d01(rng) < 50) {
-        std::uniform_int_distribution<int> d255(0, 255);
-        p.rgb = std::to_string(d255(rng)) + "," + std::to_string(d255(rng)) + "," +
-                std::to_string(d255(rng));
+        // A random color, but never black: the chip cannot hold it, so the
+        // server rejects it (the invalid bucket above covers that case).
+        int r = 0, g = 0, b = 0;
+        do {
+            std::uniform_int_distribution<int> d255(0, 255);
+            r = d255(rng);
+            g = d255(rng);
+            b = d255(rng);
+        } while (r == 0 && g == 0 && b == 0);
+        p.rgb = std::to_string(r) + "," + std::to_string(g) + "," + std::to_string(b);
     }
     if (d01(rng) < 45) {
-        std::uniform_int_distribution<int> d255(0, 255);
+        // Brightness 0 is not settable (see above), so random values start at 1.
+        std::uniform_int_distribution<int> d255(1, 255);
         p.brightness = d255(rng);
     }
 
@@ -699,11 +719,6 @@ int main(int argc, char* argv[]) {
                    : (h.action.empty() ? std::string("no response") : h.action));
         expected = State{"on", 128, "255,0,0", 0, 0};
     }
-    // The chip state (what GET source=applied and the hardware readback
-    // report). Normally identical to the desired state; it diverges only when
-    // a zero color/brightness target is set while the LED is off (the chip
-    // retains the previous value there).
-    State physical = expected;
 
     // --- Random transition loop -------------------------------------------
     int failed_iterations = 0;
@@ -712,8 +727,9 @@ int main(int argc, char* argv[]) {
     for (int iter = 1; iter <= opts.iterations; ++iter) {
         Patch p = make_random_patch(expected, rng);
         bool rejected = false;
+        std::string err_field;
         State after;
-        resolve_patch(expected, p, after, &rejected);
+        resolve_patch(expected, p, after, &rejected, &err_field);
         if (rejected) ++invalid_seen;
 
         std::cout << "iter " << iter << ": SET " << (p.empty() ? "(none)" : p.describe())
@@ -729,10 +745,10 @@ int main(int argc, char* argv[]) {
         Response r = parse_response(client.read_line());
 
         if (rejected) {
-            // The server must reject with INVALID_ARGUMENT field=on_ms and
-            // leave every state untouched.
+            // The server must reject with INVALID_ARGUMENT on the offending
+            // field and leave every state untouched.
             bool ok = r.ok == false && r.action == "INVALID_ARGUMENT" &&
-                      r.field("field") == "on_ms";
+                      r.field("field") == err_field;
             check(ok, "iter " + std::to_string(iter) + ": invalid patch rejected",
                   ok ? "" : "response: " + (r.action.empty() ? std::string("no response")
                                                              : (r.ok ? "OK " : "ERR ") + r.action));
@@ -741,13 +757,13 @@ int main(int argc, char* argv[]) {
             } else {
                 // State must be unchanged.
                 Response h = get_hardware(client, led, next_request_id);
-                check(h.ok && hardware_matches(state_from_get(h), physical),
+                check(h.ok && hardware_matches(state_from_get(h), expected),
                       "iter " + std::to_string(iter) + ": state unchanged after rejection",
                       h.ok ? state_from_get(h).describe() : "no response");
                 if (client.send_line("GET " + std::to_string(next_request_id()) + " " + led +
                                      " source=applied")) {
                     Response a = parse_response(client.read_line());
-                    check(a.ok && logical_matches(state_from_get(a), physical),
+                    check(a.ok && logical_matches(state_from_get(a), expected),
                           "iter " + std::to_string(iter) + ": applied unchanged after rejection",
                           a.ok ? state_from_get(a).describe() : "no response");
                 }
@@ -789,35 +805,30 @@ int main(int argc, char* argv[]) {
 
         ::usleep(opts.settle_ms * 1000);
 
-        // The chip state after this update (differs from the logical state
-        // only for zero color/brightness targets while off).
-        State after_physical = physical_after(physical, after);
-
         // Verification against the hardware (the reliable ground truth),
         // with retries for the server-wide hardware-read rate limit.
         Response h = get_hardware(client, led, next_request_id);
         std::string hw_detail;
         if (h.ok) {
-            hw_detail = hardware_matches(state_from_get(h), after_physical)
+            hw_detail = hardware_matches(state_from_get(h), after)
                             ? ""
-                            : "expected " + after_physical.describe() + ", hardware: " +
+                            : "expected " + after.describe() + ", hardware: " +
                                   state_from_get(h).describe();
         } else {
             hw_detail = h.action.empty() ? std::string("no response")
                                          : (h.ok ? "OK " : "ERR ") + h.action;
         }
-        check(h.ok && hardware_matches(state_from_get(h), after_physical),
+        check(h.ok && hardware_matches(state_from_get(h), after),
               "iter " + std::to_string(iter) + ": hardware matches expected", hw_detail);
 
-        // The server's applied state must agree with the hardware truth.
+        // The server's logical states must agree with the hardware truth.
         if (client.send_line("GET " + std::to_string(next_request_id()) + " " + led +
                              " source=applied")) {
             Response a = parse_response(client.read_line());
-            check(a.ok && logical_matches(state_from_get(a), after_physical),
+            check(a.ok && logical_matches(state_from_get(a), after),
                   "iter " + std::to_string(iter) + ": applied matches expected",
                   a.ok ? state_from_get(a).describe() : "no response");
         }
-        // The desired state takes the logical (possibly unapplied) value.
         if (client.send_line("GET " + std::to_string(next_request_id()) + " " + led +
                              " source=desired")) {
             Response d = parse_response(client.read_line());
@@ -827,7 +838,6 @@ int main(int argc, char* argv[]) {
         }
 
         expected = after;
-        physical = after_physical;
 
         if (iter % 20 == 0) {
             std::cout << "  ... " << iter << "/" << opts.iterations << " iterations done\n";

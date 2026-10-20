@@ -119,20 +119,6 @@ std::optional<HardwareBatch> Scheduler::generate_batch() {
         }
 
         LedPatch diff = LedPatch::diff(slot.desired, slot.applied);
-        // The chip acknowledges but ignores zero-valued color/brightness
-        // updates in off/on modes (verified on real hardware: brightness=0
-        // and color=0,0,0 are treated as "keep current value"), so a zero
-        // target can never converge there. Do not chase it (retrying forever
-        // floods the log and the I2C bus); the value is re-issued with the
-        // next mode change to blink/breath, which the chip does apply.
-        if (slot.desired.mode == OpMode::Off || slot.desired.mode == OpMode::On) {
-            if (slot.desired.brightness == 0) {
-                diff.brightness.reset();
-            }
-            if (slot.desired.rgb.r == 0 && slot.desired.rgb.g == 0 && slot.desired.rgb.b == 0) {
-                diff.rgb.reset();
-            }
-        }
         if (!diff.empty()) {
             batch.operations.push_back(HardwareOperation{id, diff, slot.desired});
             max_gen = std::max(max_gen, slot.desired_generation);

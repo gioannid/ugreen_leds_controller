@@ -88,18 +88,17 @@ no transition was ever verified as a whole. The hardening:
   hardware genuinely reached the desired state.
 - **Post-apply verification** — after every command is acknowledged, the
   I2C backend reads the LED back and confirms the state as a whole matches
-  the plan (mode, color, brightness, and the active cycle; in off/on modes
-  zero color/brightness targets are not verifiable since the chip ignores
-  them, non-zero targets must converge; a mismatch is a `HardwareException`
-  into the existing error/retry path).
-- **Zero color/brightness policy** — the chip acknowledges but ignores
-  zero-valued color/brightness updates in off/on modes (verified on real
-  hardware: `brightness=0` and `color=0,0,0` are treated as "keep current
-  value"; a default `off` fallback of `rgb=0,0,0 brightness=0` can never
-  converge and would retry forever, flooding the log). The scheduler
-  therefore does not chase a zero color/brightness target in off/on modes —
-  the value is re-programmed together with the next mode change to
-  blink/breath, which the chip does apply.
+  the plan (mode, color, brightness, and the active cycle); a mismatch is a
+  `HardwareException` into the existing error/retry path.
+- **Zero color/brightness is not settable** — verified on real hardware in
+  every mode: the chip acknowledges a zero-valued color or brightness write
+  but ignores it (the register keeps its previous value), so a zero target
+  can never converge. The parser therefore rejects `brightness=0` and
+  `rgb=0,0,0` up front (`INVALID_ARGUMENT field=brightness` / `field=rgb`),
+  and the `[fallback]` config validation rejects them too. The built-in
+  default fallback and `LedState` defaults use the chip's power-on values
+  (off, `rgb=255,0,0`, `brightness=200`) — representable values — so the
+  scheduler only ever chases states the chip can actually hold.
 - **Startup calibration** — the reactor reads every supported LED at start
   and adopts the real state as the desired/applied baseline, so the first
   client update is diffed against the truth (previously a first
@@ -120,8 +119,8 @@ no transition was ever verified as a whole. The hardening:
 **Real-hardware monkey test** (`hw_monkey_test`):
 
 - Built as a separate statically linked binary (`make hw_monkey_test`); like `example_client` it is a pure protocol client (no server objects), so it is a single file to copy to the production machine. It needs a **running** `ugreen_leds_server` with `backend=i2c`: `sudo ./hw_monkey_test --socket /tmp/ugreen_leds.sock --confirm`.
-- Drives one LED (default: first available disk LED; same selection rules as the smoke test) through `--iterations` (default 200) random partial updates — every combination of mode / rgb / brightness / on_ms / off_ms with edge values (5 ms … 60 s halves, 16-bit boundary), plus ~5% deliberately invalid patches (zero cycle, cycle overflow, single-field overflow) that the server must reject without disturbing the state.
-- After every accepted update it waits for a `FLUSH` barrier, then verifies with `GET source=hardware` (retried across the server-wide read rate limit): mode, RGB and brightness must match, and blink/breath cycles must match exactly (off/on readbacks may retain stale cycle registers, so timing is compared only for active animation). The server's `GET source=applied` must agree with the hardware truth; `GET source=desired` must agree with the logical expected state (the two diverge by design only when a zero color/brightness target is set in off/on mode — the chip retains the previous value, which the test's independent model also predicts).
+- Drives one LED (default: first available disk LED; same selection rules as the smoke test) through `--iterations` (default 200) random partial updates — every combination of mode / rgb / brightness / on_ms / off_ms with edge values (5 ms … 60 s halves, 16-bit boundary), plus ~5% deliberately invalid patches (zero cycle, cycle overflow, single-field overflow, zero brightness, black color) that the server must reject without disturbing the state.
+- After every accepted update it waits for a `FLUSH` barrier, then verifies with `GET source=hardware` (retried across the server-wide read rate limit): mode, RGB and brightness must match, and blink/breath cycles must match exactly (off/on readbacks may retain stale cycle registers, so timing is compared only for active animation). The server's `GET source=applied` and `GET source=desired` must both agree with that hardware truth — because zero color/brightness is rejected at parse time, all three states always converge and are checked against a single expected model.
 - The expected-state model is an *independent* re-implementation of the transition contract (not shared server code), so a server regression fails the test rather than mirroring it. The LED's original state is restored at the end. `--seed` makes runs reproducible. Exit codes: 0 = passed, 1 = checks failed, 2 = environment error, 3 = cancelled by user.
 
 **Stage 4 tests without hardware** (in `test_runner`, follow the existing paradigm):
@@ -129,7 +128,7 @@ no transition was ever verified as a whole. The hardening:
 - `backend` config key: parsing, rejection of unknown backends, defaults.
 - Device-discovery sanity and an environment-aware construction test: on a host without the UGREEN chip the backend must fail cleanly; on the production host it must come up, report LEDs, and reject non-present ones. The same test suite therefore passes on both machines.
 
-### Test Suite (79 tests)
+### Test Suite (92 tests)
 
 | Test File | Tests |
 |---|---|
@@ -154,6 +153,7 @@ The implementation follows the ARCHITECTURE.md design:
 - **Scheduling**: per-LED desired/applied state, dirty-field tracking, single in-flight batch, generation-based FLUSH barriers
 - **`reply=none`**: suppresses `OK ACCEPTED` but not errors
 - **Timing validation**: rejects `on_ms + off_ms > 65535` (16-bit cycle overflow), zero-cycle blink/breath, and zero half-cycles (the chip rejects blink/breath with `on_ms=0` or `off_ms=0`)
+- **Zero color/brightness rejection**: the chip acknowledges but ignores zero-valued color/brightness writes in every mode (verified on real hardware), so `brightness=0` and `rgb=0,0,0` are rejected at parse time (`INVALID_ARGUMENT field=brightness` / `field=rgb`) and in `[fallback]` config validation; `LedState` defaults and the built-in fallback use the chip's representable power-on values (off, red, brightness 200)
 - **Single copy of the controller code, unmodified**: the server compiles `cli/i2c.cpp` and `cli/ugreen_leds.cpp` directly (objects `cli_i2c.o`, `cli_ugreen_leds.o`); `I2cLedBackend` wraps `ugreen_leds_t` as-is and keeps no copies of the wire protocol. The `cli/` sources are untouched, so the legacy CLI carries zero regression risk from the server.
 - **Two hardware paths, one interface**: `FakeLedBackend` (default, development) and `I2cLedBackend` (real HW, `backend=i2c`) both satisfy the `LedBackend` interface; the reactor, scheduler, ownership, and worker code is backend-agnostic.
 

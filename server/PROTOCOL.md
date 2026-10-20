@@ -112,9 +112,9 @@ S: OK 2 CAPS version=1 leds=power,netdev,disk1,disk2,disk3,disk4 modes=off,on,bl
 ### 5.2 `SET` — desired-state update
 
 ```text
-C: SET <id> <led|all> [mode=<mode>] [rgb=<R>,<G>,<B>] [brightness=<0-255>]
-                     [on_ms=<0-65535>] [off_ms=<0-65535>]
-                     [priority=<0..2^31-1>] [reply=none]
+C: SET <id> <led|all> [mode=<mode>] [rgb=<R>,<G>,<B>] [brightness=<1-255>]
+                      [on_ms=<0-65535>] [off_ms=<0-65535>]
+                      [priority=<0..2^31-1>] [reply=none]
 S: OK <id> ACCEPTED generation=<n>
 ```
 
@@ -127,8 +127,8 @@ Field rules:
 | Field | Value | Notes |
 |---|---|---|
 | `mode` | `off` \| `on` \| `blink` \| `breath` | |
-| `rgb` | `R,G,B`, each `0`–`255` | no spaces, e.g. `rgb=0,255,0` |
-| `brightness` | `0`–`255` | |
+| `rgb` | `R,G,B`, each `0`–`255` | no spaces, e.g. `rgb=0,255,0`; **not all zero** (see below) |
+| `brightness` | `1`–`255` | **not zero** (see below) |
 | `on_ms` | `0`–`65535` | on-time of one blink/breath cycle |
 | `off_ms` | `0`–`65535` | off-time of one blink/breath cycle |
 | `priority` | non-negative integer | see [Ownership and priority](#7-ownership-and-priority); omit to use your configured default |
@@ -142,6 +142,14 @@ breath commands with `on_ms=0` or `off_ms=0`. This applies both when both
 fields are given in one `SET` and when a single-field update resolves to a
 zero half-cycle against the retained field. Violations produce
 `ERR <id> INVALID_ARGUMENT field=on_ms`.
+
+Zero color/brightness is not settable: the controller chip acknowledges but
+**ignores** a zero-valued color or brightness write (the register keeps its
+previous value; verified on real hardware in every mode). The server
+therefore rejects `brightness=0` and `rgb=0,0,0` up front with
+`ERR <id> INVALID_ARGUMENT field=brightness` / `field=rgb` instead of
+accepting a target that can never converge. Use `mode=off` to make an LED
+invisible — zero color/brightness adds nothing on top of it.
 
 Semantics:
 
@@ -308,14 +316,11 @@ overflow) close the connection **without** an error line.
   invalidates the uncertain applied fields, and the scheduler retries on the
   next tick. `FLUSH` is the way to observe persistent failure
   (`HARDWARE_ERROR`).
-- **Zero color/brightness in off/on modes**: the controller acknowledges but
-  ignores zero-valued color/brightness updates while the LED is `off` or `on`
-  (the registers keep their previous value; verified on real hardware). Such
-  updates are accepted into the desired state but are **not retried** — the
-  value is re-programmed together with the next mode change to blink/breath,
-  which the chip does apply. Until then `GET source=applied` /
-  `GET source=hardware` may show the previous color/brightness while
-  `GET source=desired` shows the requested zero.
+- **No unrepresentable targets**: because zero color/brightness is rejected
+  at parse time (see [SET](#52-set--desired-state-update)) and fallback states
+  are validated the same way, the scheduler only ever chases states the chip
+  can actually hold; `GET source=desired`, `source=applied` and
+  `source=hardware` always converge after a successful `FLUSH`.
 - **Rate limits**: per-connection command rate (token bucket, burst = rate,
   default 500/s; `0` disables) and server-wide hardware-read rate (default
   10/s; `0` disables). Both are server configuration.

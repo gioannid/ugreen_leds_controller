@@ -9,22 +9,23 @@ void run_scheduler_tests() {
     test::run_test("Update coalescing produces single write with newest value", []() {
         Scheduler sched({LedId::Disk1, LedId::Disk2});
 
-        // 20 rapid brightness updates to Disk1
+        // 20 rapid brightness updates to Disk1 (final value differs from the
+        // initial state, whose default brightness is 200)
         for (int b = 1; b <= 20; ++b) {
             LedPatch p;
-            p.brightness = static_cast<uint8_t>(b * 10);
+            p.brightness = static_cast<uint8_t>(b * 10 + 5);
             sched.apply_patch(LedId::Disk1, p);
         }
 
         TEST_ASSERT(sched.has_dirty());
-        TEST_ASSERT_EQ(sched.get_desired(LedId::Disk1).brightness, 200);
+        TEST_ASSERT_EQ(sched.get_desired(LedId::Disk1).brightness, 205);
 
         auto batch = sched.generate_batch();
         TEST_ASSERT(batch.has_value());
         TEST_ASSERT_EQ(batch->operations.size(), 1U);
         TEST_ASSERT_EQ(batch->operations[0].id, LedId::Disk1);
         TEST_ASSERT(batch->operations[0].patch.brightness.has_value());
-        TEST_ASSERT_EQ(*batch->operations[0].patch.brightness, 200);
+        TEST_ASSERT_EQ(*batch->operations[0].patch.brightness, 205);
 
         // While batch is in flight, generate_batch returns nullopt (bounded FIFO)
         auto second = sched.generate_batch();
@@ -40,7 +41,7 @@ void run_scheduler_tests() {
 
         // After completion, applied state equals desired state and not dirty
         TEST_ASSERT(!sched.has_dirty());
-        TEST_ASSERT_EQ(sched.get_applied(LedId::Disk1).brightness, 200);
+        TEST_ASSERT_EQ(sched.get_applied(LedId::Disk1).brightness, 205);
     });
 
     test::run_test("No redundant hardware writes if state unchanged", []() {
@@ -49,71 +50,12 @@ void run_scheduler_tests() {
 
         // Applying identical patch as already applied produces no operations in batch
         LedPatch p;
-        p.brightness = 0; // already 0 initially
+        p.brightness = 200; // already 200 initially (the chip's default)
         sched.apply_patch(LedId::Disk1, p);
 
         auto batch = sched.generate_batch();
         TEST_ASSERT(!batch.has_value());
         TEST_ASSERT(!sched.has_dirty());
-    });
-
-    test::run_test("Zero color/brightness drift in off/on modes is not chased", []() {
-        Scheduler sched({LedId::Disk1});
-
-        // The LED is off with retained (non-zero) color/brightness registers,
-        // e.g. the chip's power-on defaults.
-        LedState hw;
-        hw.mode = OpMode::Off;
-        hw.brightness = 200;
-        hw.rgb = RgbColor{255, 0, 0};
-        sched.calibrate(LedId::Disk1, hw);
-
-        // The default fallback target: off with zero color/brightness. The
-        // chip acknowledges but ignores zero values in off/on modes, so this
-        // can never converge: no hardware write must be generated, and the
-        // slot must not stay dirty (retrying forever would flood the log).
-        LedPatch p;
-        p.brightness = 0;
-        p.rgb = RgbColor{0, 0, 0};
-        sched.apply_patch(LedId::Disk1, p);
-
-        auto batch = sched.generate_batch();
-        TEST_ASSERT(!batch.has_value());
-        TEST_ASSERT(!sched.has_dirty());
-        TEST_ASSERT_EQ(sched.get_applied(LedId::Disk1).brightness, 200);
-
-        // A non-zero target while off is applied by the chip and must still
-        // converge with the zero fields left alone.
-        LedPatch p2;
-        p2.brightness = 100;
-        sched.apply_patch(LedId::Disk1, p2);
-        auto batch2 = sched.generate_batch();
-        TEST_ASSERT(batch2.has_value());
-        TEST_ASSERT_EQ(batch2->operations.size(), 1U);
-        TEST_ASSERT(batch2->operations[0].patch.brightness.has_value());
-        TEST_ASSERT_EQ(*batch2->operations[0].patch.brightness, 100);
-        TEST_ASSERT(!batch2->operations[0].patch.rgb.has_value());
-        TEST_ASSERT(!batch2->operations[0].patch.mode.has_value());
-
-        HardwareBatchResult res;
-        res.batch_id = batch2->batch_id;
-        res.max_generation = batch2->max_generation;
-        res.success = true;
-        res.applied_states.push_back({LedId::Disk1, batch2->operations[0].target_state});
-        sched.on_batch_complete(res);
-        TEST_ASSERT(!sched.has_dirty());
-
-        // Zero brightness in on mode is also not chased.
-        LedPatch p3;
-        p3.mode = OpMode::On;
-        p3.brightness = 0;
-        sched.apply_patch(LedId::Disk1, p3);
-        auto batch3 = sched.generate_batch();
-        TEST_ASSERT(batch3.has_value());
-        // The mode change is issued, but the zero brightness is stripped.
-        TEST_ASSERT_EQ(batch3->operations.size(), 1U);
-        TEST_ASSERT(batch3->operations[0].patch.mode.has_value());
-        TEST_ASSERT(!batch3->operations[0].patch.brightness.has_value());
     });
 
     test::run_test("Short activity flashes coalesce within interval", []() {

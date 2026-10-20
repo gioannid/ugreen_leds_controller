@@ -270,6 +270,18 @@ bool parse_fallback_state(const std::string& s, LedState& out, std::string& err)
         return false;
     }
 
+    // The chip never stores a zero brightness or a black color (the write is
+    // acknowledged but ignored), so an explicitly zero field can never
+    // converge. Unspecified fields keep the chip-representable defaults.
+    if (seen.count("brightness") && out.brightness == 0) {
+        err = "brightness 0 is not supported by the hardware";
+        return false;
+    }
+    if (seen.count("rgb") && out.rgb.r == 0 && out.rgb.g == 0 && out.rgb.b == 0) {
+        err = "rgb 0,0,0 is not supported by the hardware";
+        return false;
+    }
+
     if (seen.count("on_ms") && seen.count("off_ms")) {
         std::string err_field;
         if (!validate_cycle_timing(out.on_ms, out.off_ms, out.mode, &err_field)) {

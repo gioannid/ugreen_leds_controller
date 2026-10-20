@@ -46,10 +46,14 @@ struct RgbColor {
 };
 
 // Current logical or physical state of an individual LED.
+// The defaults are the chip's power-on values: the chip acknowledges but
+// never stores a zero brightness or a black color (verified on real
+// hardware), so zero is not a settable value and unset fields must hold
+// representable values.
 struct LedState {
     OpMode mode = OpMode::Off;
-    uint8_t brightness = 0;
-    RgbColor rgb = {0, 0, 0};
+    uint8_t brightness = 200;
+    RgbColor rgb = {255, 0, 0};
     uint16_t on_ms = 0;
     uint16_t off_ms = 0;
     bool valid = true;

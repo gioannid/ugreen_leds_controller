@@ -225,6 +225,18 @@ void run_config_tests() {
         ok = load_ok("[fallback]\npower=mode=breath on_ms=100 off_ms=0\n", cfg, err);
         TEST_ASSERT(!ok);
 
+        // Zero brightness / black color are not chip-representable
+        ok = load_ok("[fallback]\npower=mode=on brightness=0\n", cfg, err);
+        TEST_ASSERT(!ok);
+
+        ok = load_ok("[fallback]\npower=mode=on rgb=0,0,0\n", cfg, err);
+        TEST_ASSERT(!ok);
+
+        // Partial fallback without brightness/rgb keeps chip-representable defaults
+        ok = load_ok("[fallback]\npower=mode=off\n", cfg, err);
+        TEST_ASSERT(ok);
+        TEST_ASSERT_EQ(cfg.fallbacks.at(LedId::Power).brightness, 200);
+
         ok = load_ok("[fallback]\n"
                      "power=mode=blink on_ms=100 off_ms=100\n"
                      "power=mode=on\n",

@@ -181,32 +181,20 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
 
 // Post-apply verification: the chip acknowledged each command, but the
 // resulting state as a whole must still match what the plan intended. In
-// off/on modes only the mode is compared — the chip acknowledges but ignores
-// zero-valued color/brightness updates in these modes (verified on real
-// hardware), so the readback registers are not verifiable for zero targets;
-// they are re-programmed with the next mode change to blink/breath. In
-// blink/breath modes the full state including timing is compared.
+// off/on modes only mode/color/brightness are compared — the chip retains
+// its cycle registers across off/on, so the readback timing there is not
+// meaningful.
 bool states_match_after_apply(const LedState& expected, const LedState& actual) {
     if (!actual.valid || actual.mode != expected.mode) {
         return false;
     }
-    if (expected.mode == OpMode::Off || expected.mode == OpMode::On) {
-        // For non-zero targets the registers are verifiable; for zero
-        // targets the chip retains the previous value, so we cannot
-        // distinguish "applied" from "ignored" — accept both.
-        if (expected.brightness != 0 && actual.brightness != expected.brightness) {
-            return false;
-        }
-        bool expected_black = expected.rgb.r == 0 && expected.rgb.g == 0 && expected.rgb.b == 0;
-        if (!expected_black && actual.rgb != expected.rgb) {
-            return false;
-        }
-        return true;
-    }
     if (actual.rgb != expected.rgb || actual.brightness != expected.brightness) {
         return false;
     }
-    return actual.on_ms == expected.on_ms && actual.off_ms == expected.off_ms;
+    if (expected.mode == OpMode::Blink || expected.mode == OpMode::Breath) {
+        return actual.on_ms == expected.on_ms && actual.off_ms == expected.off_ms;
+    }
+    return true;
 }
 
 std::string describe_led_state(const LedState& s) {

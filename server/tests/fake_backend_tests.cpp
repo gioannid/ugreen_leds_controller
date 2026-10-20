@@ -16,10 +16,15 @@ void run_fake_backend_tests() {
         TEST_ASSERT(caps.is_led_supported(LedId::Disk2));
         TEST_ASSERT(!caps.is_led_supported(LedId::Disk5));
 
+        // The initial state mirrors the chip's power-on values (off, red,
+        // 200): the chip never holds a zero brightness or a black color.
         auto s = backend.read(LedId::Disk1);
         TEST_ASSERT(s.valid);
         TEST_ASSERT_EQ(s.mode, OpMode::Off);
-        TEST_ASSERT_EQ(s.brightness, 0);
+        TEST_ASSERT_EQ(s.brightness, 200);
+        TEST_ASSERT_EQ(s.rgb.r, 255);
+        TEST_ASSERT_EQ(s.rgb.g, 0);
+        TEST_ASSERT_EQ(s.rgb.b, 0);
     });
 
     test::run_test("Apply patch and read back", []() {

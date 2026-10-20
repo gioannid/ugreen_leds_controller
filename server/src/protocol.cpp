@@ -331,7 +331,9 @@ ParseResult ProtocolParser::parse_line(std::string_view line) {
                 req.patch.mode = *mode;
             } else if (key == "brightness") {
                 uint8_t b = 0;
-                if (!parse_u8(val, b)) {
+                if (!parse_u8(val, b) || b == 0) {
+                    // Zero brightness is not settable: the chip acknowledges
+                    // the write but ignores it (keeps the current value).
                     result.status = ParseResult::Status::Error;
                     result.error_response = Response::error(req_id, "INVALID_ARGUMENT", {{"field", "brightness"}});
                     return result;
@@ -339,7 +341,9 @@ ParseResult ProtocolParser::parse_line(std::string_view line) {
                 req.patch.brightness = b;
             } else if (key == "rgb") {
                 auto rgb = parse_rgb(val);
-                if (!rgb) {
+                if (!rgb || (rgb->r == 0 && rgb->g == 0 && rgb->b == 0)) {
+                    // Black is not settable for the same reason as zero
+                    // brightness: the chip ignores zero-valued color writes.
                     result.status = ParseResult::Status::Error;
                     result.error_response = Response::error(req_id, "INVALID_ARGUMENT", {{"field", "rgb"}});
                     return result;

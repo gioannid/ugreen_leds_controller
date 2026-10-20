@@ -145,6 +145,32 @@ void run_protocol_tests() {
         TEST_ASSERT_EQ(bad_mode.error_response->action, "INVALID_ARGUMENT");
     });
 
+    test::run_test("Parse SET rejects zero brightness and black color", []() {
+        auto field_of = [](const Response& r) {
+            for (const auto& kv : r.fields) {
+                if (kv.first == "field") return kv.second;
+            }
+            return std::string();
+        };
+        // The chip acknowledges but ignores zero-valued color/brightness
+        // writes, so they are not settable.
+        auto z0 = ProtocolParser::parse_line("SET 114 disk1 brightness=0");
+        TEST_ASSERT(z0.status == ParseResult::Status::Error);
+        TEST_ASSERT_EQ(z0.error_response->action, "INVALID_ARGUMENT");
+        TEST_ASSERT_EQ(field_of(*z0.error_response), "brightness");
+
+        auto z1 = ProtocolParser::parse_line("SET 115 disk1 rgb=0,0,0");
+        TEST_ASSERT(z1.status == ParseResult::Status::Error);
+        TEST_ASSERT_EQ(z1.error_response->action, "INVALID_ARGUMENT");
+        TEST_ASSERT_EQ(field_of(*z1.error_response), "rgb");
+
+        // Non-zero values remain valid.
+        auto ok_b = ProtocolParser::parse_line("SET 116 disk1 brightness=1");
+        TEST_ASSERT(ok_b.status == ParseResult::Status::Success);
+        auto ok_r = ProtocolParser::parse_line("SET 117 disk1 rgb=0,0,1");
+        TEST_ASSERT(ok_r.status == ParseResult::Status::Success);
+    });
+
     test::run_test("Timing validation constraints", []() {
         // Combined cycle > 65535 must be rejected
         auto r1 = ProtocolParser::parse_line("SET 107 disk1 on_ms=40000 off_ms=30000");
