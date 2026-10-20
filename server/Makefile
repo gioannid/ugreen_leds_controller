@@ -49,7 +49,15 @@ TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 HW_TEST_SRCS = tests/hw/hardware_smoke_test.cpp
 HW_TEST_OBJS = $(HW_TEST_SRCS:.cpp=.o)
 
-all: ugreen_leds_server test_runner example_client hw_smoke_test
+# Real-hardware monkey test: standalone protocol client (like example_client,
+# no server objects needed) that runs against a LIVE ugreen_leds_server with
+# backend=i2c and drives one LED through many random transitions, verifying
+# each step with GET source=hardware. Statically linked so it can be copied
+# as a single file.
+HW_MONKEY_TEST_SRC = tests/hw/hardware_monkey_test.cpp
+HW_MONKEY_TEST_OBJ = $(HW_MONKEY_TEST_SRC:.cpp=.o)
+
+all: ugreen_leds_server test_runner example_client hw_smoke_test hw_monkey_test
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
@@ -72,10 +80,13 @@ example_client: examples/client.o
 hw_smoke_test: $(HW_TEST_OBJS) $(LIB_OBJS) $(COMMON_OBJS)
 	$(CXX) $(CXXFLAGS) -static -o $@ $^
 
+hw_monkey_test: $(HW_MONKEY_TEST_OBJ)
+	$(CXX) $(CXXFLAGS) -static -o $@ $^
+
 test: test_runner
 	./test_runner
 
 clean:
-	rm -f src/*.o tests/*.o tests/hw/*.o examples/*.o $(COMMON_OBJS) ugreen_leds_server test_runner example_client hw_smoke_test
+	rm -f src/*.o tests/*.o tests/hw/*.o examples/*.o $(COMMON_OBJS) ugreen_leds_server test_runner example_client hw_smoke_test hw_monkey_test
 
 .PHONY: all test clean

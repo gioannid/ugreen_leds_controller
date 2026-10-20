@@ -16,6 +16,10 @@
 
 namespace ugreen {
 
+// Client id reserved for server-internal hardware reads (startup
+// calibration). Real client ids start at 1.
+constexpr uint64_t kCalibrationClientId = 0;
+
 struct HardwareReadRequest {
     uint64_t client_id = 0;
     uint64_t request_id = 0;

@@ -38,8 +38,17 @@ std::string describe_controller_op(const ControllerOp& op);
 
 // Maps a partial update (patch) on top of the current hardware state to the
 // minimal sequence of controller commands. Pure function: no I/O, so it can
-// be unit-tested without hardware.
+// be unit-tested without hardware. Mode/timing transition semantics come
+// from resolve_target_state() (led_state.h).
 std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatch& patch);
+
+// Checks whether a post-apply readback matches the state the plan intended
+// (off/on readbacks may retain stale cycle registers, so timing is only
+// compared for animation modes). Pure function.
+bool states_match_after_apply(const LedState& expected, const LedState& actual);
+
+// Human-readable single-line description of a state (logs/tests).
+std::string describe_led_state(const LedState& s);
 
 // LedBackend implementation wrapping the existing userspace controller
 // (cli/ugreen_leds.cpp, compiled in unmodified) for the real LED hardware.
@@ -58,7 +67,7 @@ public:
 
     Capabilities capabilities() const override;
     LedState read(LedId id) override;
-    void apply(LedId id, const LedPatch& patch) override;
+    LedState apply(LedId id, const LedPatch& patch) override;
 
     // Path of the /dev/i2c-N device that was opened (useful in logs/tests).
     const std::string& device_path() const { return device_path_; }

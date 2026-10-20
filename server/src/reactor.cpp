@@ -48,6 +48,17 @@ Reactor::~Reactor() {
 bool Reactor::init() {
     worker_.start();
 
+    // Startup calibration: read every supported LED so the scheduler's
+    // baseline is the actual hardware state, not the "everything is off"
+    // assumption. Without this, a first SET that resolves to the assumed
+    // state (e.g. mode=off while the firmware has the LED lit) would be a
+    // no-op batch and the scheduler would silently disagree with the panel.
+    // These reads are internal (client id 0) and bypass the client-facing
+    // hardware-read rate limit.
+    for (auto led : worker_.capabilities().supported_leds) {
+        worker_.submit_read(HardwareReadRequest{kCalibrationClientId, 0, led});
+    }
+
     if (config_.transport.enable_unix_socket) {
         unix_listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
         if (unix_listen_fd_ < 0) {
@@ -337,6 +348,21 @@ void Reactor::handle_worker_wakeup() {
 
     auto completed_reads = worker_.pop_completed_reads();
     for (const auto& r : completed_reads) {
+        if (r.client_id == kCalibrationClientId) {
+            if (r.success) {
+                scheduler_.calibrate(r.id, r.state);
+                log::debug("startup calibration: " + to_string(r.id) + " is " +
+                           to_string(r.state.mode) +
+                           (r.state.mode == OpMode::Blink || r.state.mode == OpMode::Breath
+                                ? " on_ms=" + std::to_string(r.state.on_ms) +
+                                  " off_ms=" + std::to_string(r.state.off_ms)
+                                : ""));
+            } else {
+                log::warn("startup calibration read of " + to_string(r.id) + " failed: " +
+                          r.error_message + " (scheduler keeps its assumption until the first write)");
+            }
+            continue;
+        }
         auto it = clients_.find(r.client_id);
         if (it != clients_.end()) {
             if (r.success) {
@@ -619,6 +645,19 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                     return;
                 }
 
+                // SET all is atomic: the cycle must be valid against the
+                // current state of every target LED (a single-field update
+                // can overflow the 16-bit cycle against a retained field).
+                std::string cycle_err;
+                for (auto led : caps.supported_leds) {
+                    if (!validate_patch_cycle(scheduler_.get_desired(led), req.patch, &cycle_err)) {
+                        send_response(session, Response::error(req.request_id, "INVALID_ARGUMENT", {
+                            {"field", cycle_err},
+                        }));
+                        return;
+                    }
+                }
+
                 if (!ownership_.can_mutate_all(caps.supported_leds, session.client_id, prio)) {
                     log::debug("client " + std::to_string(session.client_id) + ": SET all rejected by priority (request " +
                                std::to_string(req.request_id) + ")");
@@ -653,6 +692,22 @@ void Reactor::process_command(ClientSession& session, const Request& req) {
                         {"led", to_string(req.target.id)},
                     });
                     send_response(session, err);
+                    return;
+                }
+
+                // State-dependent cycle validation: the parser can only check
+                // an on_ms/off_ms pair within one SET, but a single-field
+                // update may still overflow the 16-bit cycle against the
+                // retained value (or enter a zero cycle). Reject before the
+                // SET acquires ownership.
+                std::string cycle_err;
+                if (!validate_patch_cycle(scheduler_.get_desired(req.target.id), req.patch, &cycle_err)) {
+                    log::debug("client " + std::to_string(session.client_id) + ": SET " +
+                               to_string(req.target.id) + " rejected, invalid cycle (request " +
+                               std::to_string(req.request_id) + ")");
+                    send_response(session, Response::error(req.request_id, "INVALID_ARGUMENT", {
+                        {"field", cycle_err},
+                    }));
                     return;
                 }
 

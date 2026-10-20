@@ -39,7 +39,13 @@ public:
 
     virtual Capabilities capabilities() const = 0;
     virtual LedState read(LedId id) = 0;
-    virtual void apply(LedId id, const LedPatch& patch) = 0;
+
+    // Applies the patch and returns the resulting state as observed on the
+    // device (canonical form: see normalize_led_state). Throwing
+    // HardwareException means the update was NOT applied; the returned state
+    // is the authoritative post-apply state and the scheduler records it as
+    // the applied state (its diff baseline for the next batch).
+    virtual LedState apply(LedId id, const LedPatch& patch) = 0;
 };
 
 } // namespace ugreen

@@ -4,12 +4,15 @@
 
 ```bash
 cd server/
-make clean && make     # Builds ugreen_leds_server, test_runner, example_client, hw_smoke_test
-make test              # Runs the full test suite (79 tests, all pass)
+make clean && make     # Builds ugreen_leds_server, test_runner, example_client, hw_smoke_test, hw_monkey_test
+make test              # Runs the full test suite (91 tests, all pass)
 ```
 
-`hw_smoke_test` is a separate, statically linked binary for the production
-machine with the real LED hardware (see Stage 4 below).
+`hw_smoke_test` and `hw_monkey_test` are separate, statically linked binaries
+for the production machine with the real LED hardware (see Stage 4 below).
+`hw_monkey_test` needs a *running* server with `backend=i2c` and drives one
+LED through many random transitions, verifying every step with
+`GET source=hardware`.
 
 ## What was built
 
@@ -50,10 +53,11 @@ machine with the real LED hardware (see Stage 4 below).
 
 | File | Purpose |
 |---|---|
-| [`include/i2c_led_backend.h`](include/i2c_led_backend.h) / [`src/i2c_led_backend.cpp`](src/i2c_led_backend.cpp) | `I2cLedBackend` — wraps the existing userspace controller (`cli/ugreen_leds.cpp`, compiled in unmodified, no copies); SMBus I801 adapter auto-discovery (the CLI's own rule); `plan_led_update()` maps a partial patch to the minimal controller command sequence (pure function); CLI-style retry timing; post-write verification via the chip's last-modification result register (0x80) |
+| [`include/i2c_led_backend.h`](include/i2c_led_backend.h) / [`src/i2c_led_backend.cpp`](src/i2c_led_backend.cpp) | `I2cLedBackend` — wraps the existing userspace controller (`cli/ugreen_leds.cpp`, compiled in unmodified, no copies); SMBus I801 adapter auto-discovery (the CLI's own rule); `plan_led_update()` maps a partial patch to the minimal controller command sequence (pure function, transition semantics from `resolve_target_state()`); CLI-style retry timing; per-command verification via the chip's last-modification result register (0x80) plus a post-apply readback that the resulting state as a whole matches the plan |
 | [`include/config.h`](include/config.h) / [`src/config.cpp`](src/config.cpp) | `[server]` key `backend` (fake\|i2c); validation |
 | [`src/main.cpp`](src/main.cpp) | `--backend` flag; constructs the selected backend; refuses to start with a clear error when the I2C controller is unavailable or reports zero LEDs; warns when the fake simulator is in use |
 | [`tests/hw/hardware_smoke_test.cpp`](tests/hw/hardware_smoke_test.cpp) | `hw_smoke_test` — standalone real-hardware smoke test (see below) |
+| [`tests/hw/hardware_monkey_test.cpp`](tests/hw/hardware_monkey_test.cpp) | `hw_monkey_test` — standalone real-hardware resilience test: random transition fuzzing against a live server (see below) |
 
 **Backend behavior** (`I2cLedBackend`):
 
@@ -62,12 +66,52 @@ machine with the real LED hardware (see Stage 4 below).
 - Every command is verified against the chip's result register with the CLI's proven retry timing (settle delays, 5 attempts); a write the chip did not acknowledge is reported as `HardwareException` and handled by the existing scheduler error/retry path.
 - `read()` maps a verified 11-byte status block to `LedState` (timing zeroed for non-blink modes, where the chip may retain stale values).
 
+**Mode transition hardening** (follow-up to the blink/breath corrections):
+
+The blink/breath fixes exposed a generic weakness: mode/timing semantics were
+implemented independently in three places (scheduler `apply_patch`,
+`apply_fallback`, and the I2C planner), the scheduler recorded the *planned*
+target state as "applied" instead of what the hardware actually reached, and
+no transition was ever verified as a whole. The hardening:
+
+- **Single source of truth** — `resolve_target_state()` /
+  `normalize_led_state()` in `led_state.cpp` encode the whole contract:
+  timing without a mode implies blink; entering blink/breath from a different
+  mode without explicit timing uses the mode's default cycle (500/500,
+  1000/1000) rather than a stale inherited one; a zero cycle falls back to
+  the default; off/on states carry no active cycle. Scheduler, fake backend
+  and I2C planner all resolve through it, so they can no longer disagree.
+- **Applied state is device truth** — `LedBackend::apply()` returns the
+  post-apply state; the hardware worker records that as the scheduler's
+  applied state. Any drift (external writers, power cycle) is detected on the
+  next batch and re-issued, and a FLUSH barrier only completes once the
+  hardware genuinely reached the desired state.
+- **Post-apply verification** — after every command is acknowledged, the
+  I2C backend reads the LED back and confirms the state as a whole matches
+  the plan (mode, color, brightness, and the active cycle); a mismatch is a
+  `HardwareException` into the existing error/retry path.
+- **Startup calibration** — the reactor reads every supported LED at start
+  and adopts the real state as the desired/applied baseline, so the first
+  client update is diffed against the truth (previously a first
+  `SET mode=off` while the firmware had the LED lit was a silent no-op).
+- **State-dependent cycle validation** — the parser can only check an
+  `on_ms`/`off_ms` pair within one SET; the reactor now also rejects a
+  single-field update whose resolved cycle would overflow the chip's 16-bit
+  cycle (`INVALID_ARGUMENT field=on_ms`).
+
 **Real-hardware smoke test** (`hw_smoke_test`):
 
 - Built as a separate statically linked binary (`make hw_smoke_test`) so it can be copied to the production machine as a single file and run there, e.g. `sudo ./hw_smoke_test --confirm`.
 - Reports the detected controller and supported LEDs, then drives one LED (default: first available disk LED; the power LED is refused without `--include-power`) through: solid red → blink green (250/250 ms) → breath blue (500/500 ms) → solid white → off. Every step is verified by reading the controller back (mode, RGB, brightness, and blink/breath timing must match exactly).
 - With `--confirm` the test additionally asks the user to confirm each visible state by eye (and for an initial "proceed?" approval); a "no" answer is counted as a failed check.
 - Verifies that a non-present LED ID is rejected by the backend, and restores the LED's original state at the end. Exit codes: 0 = passed, 1 = checks failed, 2 = environment error, 3 = cancelled by user.
+
+**Real-hardware monkey test** (`hw_monkey_test`):
+
+- Built as a separate statically linked binary (`make hw_monkey_test`); like `example_client` it is a pure protocol client (no server objects), so it is a single file to copy to the production machine. It needs a **running** `ugreen_leds_server` with `backend=i2c`: `sudo ./hw_monkey_test --socket /tmp/ugreen_leds.sock --confirm`.
+- Drives one LED (default: first available disk LED; same selection rules as the smoke test) through `--iterations` (default 200) random partial updates — every combination of mode / rgb / brightness / on_ms / off_ms with edge values (5 ms … 60 s halves, 16-bit boundary), plus ~5% deliberately invalid patches (zero cycle, cycle overflow, single-field overflow) that the server must reject without disturbing the state.
+- After every accepted update it waits for a `FLUSH` barrier, then verifies with `GET source=hardware` (retried across the server-wide read rate limit): mode, RGB and brightness must match, and blink/breath cycles must match exactly (off/on readbacks may retain stale cycle registers, so timing is compared only for active animation). The server's own `GET source=applied` and `GET source=desired` must additionally agree with the hardware truth — this is the check that catches scheduler/hardware drift.
+- The expected-state model is an *independent* re-implementation of the transition contract (not shared server code), so a server regression fails the test rather than mirroring it. The LED's original state is restored at the end. `--seed` makes runs reproducible. Exit codes: 0 = passed, 1 = checks failed, 2 = environment error, 3 = cancelled by user.
 
 **Stage 4 tests without hardware** (in `test_runner`, follow the existing paradigm):
 

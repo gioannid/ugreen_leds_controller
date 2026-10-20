@@ -124,4 +124,69 @@ bool validate_cycle_timing(uint16_t on_ms, uint16_t off_ms, OpMode mode, std::st
     return true;
 }
 
+namespace {
+
+bool is_animation_mode(OpMode mode) {
+    return mode == OpMode::Blink || mode == OpMode::Breath;
+}
+
+// Default cycle for an animation mode: a non-zero cycle the chip accepts.
+void default_cycle_for_mode(OpMode mode, uint16_t& on_ms, uint16_t& off_ms) {
+    if (mode == OpMode::Breath) {
+        on_ms = 1000;
+        off_ms = 1000;
+    } else {
+        on_ms = 500;
+        off_ms = 500;
+    }
+}
+
+} // namespace
+
+LedState normalize_led_state(const LedState& s) {
+    LedState out = s;
+    if (is_animation_mode(out.mode)) {
+        if (static_cast<uint32_t>(out.on_ms) + out.off_ms == 0) {
+            default_cycle_for_mode(out.mode, out.on_ms, out.off_ms);
+        }
+    } else {
+        // Off/on states carry no active cycle.
+        out.on_ms = 0;
+        out.off_ms = 0;
+    }
+    return out;
+}
+
+LedState resolve_target_state(const LedState& current, const LedPatch& patch) {
+    LedState target = current;
+    patch.apply_to(target);
+
+    // Rule 1: timing without an explicit mode implies entering blink.
+    if (!patch.mode && (patch.on_ms || patch.off_ms) && !is_animation_mode(target.mode)) {
+        target.mode = OpMode::Blink;
+    }
+
+    // Rule 2: entering an animation mode from a different mode without
+    // explicit timing uses the mode's default cycle rather than inheriting
+    // a stale cycle from the previous mode.
+    if (patch.mode && is_animation_mode(target.mode) &&
+        !patch.on_ms && !patch.off_ms && current.mode != target.mode) {
+        default_cycle_for_mode(target.mode, target.on_ms, target.off_ms);
+    }
+
+    return normalize_led_state(target);
+}
+
+bool validate_patch_cycle(const LedState& current, const LedPatch& patch, std::string* error_field) {
+    LedState target = resolve_target_state(current, patch);
+    if (is_animation_mode(target.mode)) {
+        uint32_t total = static_cast<uint32_t>(target.on_ms) + target.off_ms;
+        if (total > 65535) {
+            if (error_field) *error_field = "on_ms";
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace ugreen

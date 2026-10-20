@@ -69,6 +69,13 @@ public:
     // Configures fallback state for a specific LED.
     void set_fallback(LedId id, const LedState& fallback);
 
+    // Startup calibration: adopts the actual hardware state as the baseline
+    // for both desired and applied, so the first client update is diffed
+    // against the truth instead of the "everything is off" assumption. No
+    // hardware write is triggered, and it is a no-op once any patch has
+    // been accepted for the LED (the normal self-healing path takes over).
+    void calibrate(LedId id, const LedState& state);
+
     // State queries
     LedState get_desired(LedId id) const;
     LedState get_applied(LedId id) const;

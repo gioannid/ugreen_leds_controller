@@ -116,6 +116,32 @@ std::string to_string(const RgbColor& color);
 // When mode is Blink or Breath, total cycle must be > 0.
 bool validate_cycle_timing(uint16_t on_ms, uint16_t off_ms, OpMode mode = OpMode::Blink, std::string* error_field = nullptr);
 
+// Mode/timing transition semantics — the single source of truth shared by
+// the scheduler (desired state), the I2C planner and the backends:
+//
+//  1. Timing given without an explicit mode implies entering blink (the chip
+//     starts cycling as soon as a cycle is programmed).
+//  2. Entering blink/breath from a different mode without explicit timing
+//     uses the mode's default cycle (blink 500/500, breath 1000/1000) rather
+//     than inheriting a stale cycle from the previous mode.
+//  3. A zero cycle in blink/breath falls back to the mode's default cycle.
+//  4. Off/on states carry no active cycle: the timing fields are cleared
+//     (the chip may keep its cycle registers, but the logical state has none).
+//
+// `resolve_target_state` applies the patch to a copy of `current` and
+// resolves the rules above; the result is always canonical (see
+// `normalize_led_state`).
+LedState resolve_target_state(const LedState& current, const LedPatch& patch);
+
+// Canonical form of a full state: animation modes carry a non-zero cycle
+// (defaulted when zero); off/on modes carry zeroed timing fields.
+LedState normalize_led_state(const LedState& s);
+
+// Validates the cycle a patch would produce given the current state. Unlike
+// the stateless parser check, this also covers single-field updates whose
+// sum with the retained field would overflow the 16-bit cycle.
+bool validate_patch_cycle(const LedState& current, const LedPatch& patch, std::string* error_field = nullptr);
+
 } // namespace ugreen
 
 #endif // UGREEN_SERVER_LED_STATE_H

@@ -116,34 +116,12 @@ std::string describe_controller_op(const ControllerOp& op) {
 }
 
 std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatch& patch) {
-    LedState target = current;
-    patch.apply_to(target);
-
-    // If timing is provided without an explicit mode for an LED currently
-    // in off/on mode, infer that the client intends to enter blink mode.
-    if ((patch.on_ms || patch.off_ms) && !patch.mode &&
-        target.mode != OpMode::Blink && target.mode != OpMode::Breath) {
-        target.mode = OpMode::Blink;
-    }
-
-    // If switching mode to Breath without explicit timing from a non-breath mode,
-    // do not inherit fast blink timing.
-    if (patch.mode && *patch.mode == OpMode::Breath && !patch.on_ms && !patch.off_ms &&
-        current.mode != OpMode::Breath) {
-        target.on_ms = 1000;
-        target.off_ms = 1000;
-    }
-    // If switching mode to Blink without explicit timing from a non-blink mode,
-    // do not inherit slow breath timing.
-    else if (patch.mode && *patch.mode == OpMode::Blink && !patch.on_ms && !patch.off_ms &&
-             current.mode != OpMode::Blink) {
-        target.on_ms = 500;
-        target.off_ms = 500;
-    }
+    const LedState cur = normalize_led_state(current);
+    const LedState target = resolve_target_state(cur, patch);
 
     std::vector<ControllerOp> ops;
 
-    if (target.rgb != current.rgb) {
+    if (target.rgb != cur.rgb) {
         ControllerOp op;
         op.type = ControllerOp::Type::SetRgb;
         op.r = target.rgb.r;
@@ -152,15 +130,14 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
         ops.push_back(op);
     }
 
-    if (target.brightness != current.brightness) {
+    if (target.brightness != cur.brightness) {
         ControllerOp op;
         op.type = ControllerOp::Type::SetBrightness;
         op.brightness = target.brightness;
         ops.push_back(op);
     }
 
-    const bool timing_changed = target.on_ms != current.on_ms || target.off_ms != current.off_ms;
-    if (target.mode != current.mode) {
+    if (target.mode != cur.mode) {
         ControllerOp op;
         switch (target.mode) {
             case OpMode::Off:
@@ -175,40 +152,58 @@ std::vector<ControllerOp> plan_led_update(const LedState& current, const LedPatc
                 op.type = ControllerOp::Type::SetBlink;
                 op.on_ms = target.on_ms;
                 op.off_ms = target.off_ms;
-                if (op.on_ms + op.off_ms == 0) {
-                    op.on_ms = 500;
-                    op.off_ms = 500;
-                }
                 break;
             case OpMode::Breath:
                 op.type = ControllerOp::Type::SetBreath;
                 op.on_ms = target.on_ms;
                 op.off_ms = target.off_ms;
-                if (op.on_ms + op.off_ms == 0) {
-                    op.on_ms = 1000;
-                    op.off_ms = 1000;
-                }
                 break;
         }
         ops.push_back(op);
-    } else if (timing_changed &&
-               (target.mode == OpMode::Blink || target.mode == OpMode::Breath)) {
+    } else if ((target.mode == OpMode::Blink || target.mode == OpMode::Breath) &&
+               (target.on_ms != cur.on_ms || target.off_ms != cur.off_ms)) {
         // Same blink/breath mode with a changed cycle: re-issue the mode
-        // command carrying the updated timing.
+        // command carrying the updated timing. The resolved target always
+        // carries a non-zero cycle in animation modes, so the command is
+        // always chip-legal.
         ControllerOp op;
         op.type = (target.mode == OpMode::Blink)
                       ? ControllerOp::Type::SetBlink
                       : ControllerOp::Type::SetBreath;
         op.on_ms = target.on_ms;
         op.off_ms = target.off_ms;
-        if (op.on_ms + op.off_ms == 0) {
-            op.on_ms = (target.mode == OpMode::Blink) ? 500 : 1000;
-            op.off_ms = (target.mode == OpMode::Blink) ? 500 : 1000;
-        }
         ops.push_back(op);
     }
 
     return ops;
+}
+
+// Post-apply verification: the chip acknowledged each command, but the
+// resulting state as a whole must still match what the plan intended. In
+// off/on modes only mode/color/brightness are compared — the chip retains
+// its cycle registers across off/on, so the readback timing there is not
+// meaningful.
+bool states_match_after_apply(const LedState& expected, const LedState& actual) {
+    if (!actual.valid || actual.mode != expected.mode) {
+        return false;
+    }
+    if (actual.rgb != expected.rgb || actual.brightness != expected.brightness) {
+        return false;
+    }
+    if (expected.mode == OpMode::Blink || expected.mode == OpMode::Breath) {
+        return actual.on_ms == expected.on_ms && actual.off_ms == expected.off_ms;
+    }
+    return true;
+}
+
+std::string describe_led_state(const LedState& s) {
+    std::string out = "mode=" + to_string(s.mode) +
+                      " rgb=" + to_string(s.rgb) +
+                      " brightness=" + std::to_string(s.brightness);
+    if (s.mode == OpMode::Blink || s.mode == OpMode::Breath) {
+        out += " on_ms=" + std::to_string(s.on_ms) + " off_ms=" + std::to_string(s.off_ms);
+    }
+    return out;
 }
 
 I2cLedBackend::I2cLedBackend() {
@@ -252,10 +247,10 @@ LedState I2cLedBackend::read(LedId id) {
         throw HardwareException("read of LED " + to_string(id) +
                                 " failed (no valid controller response)");
     }
-    return to_led_state(data);
+    return normalize_led_state(to_led_state(data));
 }
 
-void I2cLedBackend::apply(LedId id, const LedPatch& patch) {
+LedState I2cLedBackend::apply(LedId id, const LedPatch& patch) {
     if (!caps_.is_led_supported(id)) {
         throw HardwareException("unsupported LED: " + to_string(id));
     }
@@ -265,8 +260,9 @@ void I2cLedBackend::apply(LedId id, const LedPatch& patch) {
         throw HardwareException("read of LED " + to_string(id) +
                                 " failed before update (no valid controller response)");
     }
-    LedState current = to_led_state(current_raw);
+    LedState current = normalize_led_state(to_led_state(current_raw));
 
+    const LedState expected = resolve_target_state(current, patch);
     auto ops = plan_led_update(current, patch);
     for (const auto& op : ops) {
         if (!execute_with_verify(to_cli_led(id), op)) {
@@ -274,6 +270,23 @@ void I2cLedBackend::apply(LedId id, const LedPatch& patch) {
                                     " for LED " + to_string(id));
         }
     }
+
+    // Post-apply verification: every command was acknowledged, but the
+    // resulting state as a whole must still match what the plan intended.
+    // A mismatch is a real failure: the scheduler keeps the previous applied
+    // state, retries on the next tick, and fails the FLUSH barrier.
+    auto after_raw = read_status_robust(to_cli_led(id));
+    if (!after_raw.is_available) {
+        throw HardwareException("read of LED " + to_string(id) +
+                                " failed after update (no valid controller response)");
+    }
+    LedState actual = normalize_led_state(to_led_state(after_raw));
+    if (!states_match_after_apply(expected, actual)) {
+        throw HardwareException("state mismatch after update for LED " + to_string(id) +
+                                ": expected " + describe_led_state(expected) +
+                                ", got " + describe_led_state(actual));
+    }
+    return actual;
 }
 
 ugreen_leds_t::led_data_t I2cLedBackend::read_status_robust(ugreen_leds_t::led_type_t id) {

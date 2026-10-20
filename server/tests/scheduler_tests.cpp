@@ -106,6 +106,189 @@ void run_scheduler_tests() {
         TEST_ASSERT(barrier_success);
     });
 
+    test::run_test("Mode transition to blink without timing uses blink default cycle", []() {
+        Scheduler sched({LedId::Disk1});
+
+        LedPatch p;
+        p.mode = OpMode::Blink;
+        sched.apply_patch(LedId::Disk1, p);
+
+        auto d = sched.get_desired(LedId::Disk1);
+        TEST_ASSERT_EQ(d.mode, OpMode::Blink);
+        TEST_ASSERT_EQ(d.on_ms, 500);
+        TEST_ASSERT_EQ(d.off_ms, 500);
+    });
+
+    test::run_test("Mode transition to breath from blink uses breath default, not inherited blink cycle", []() {
+        Scheduler sched({LedId::Disk1});
+
+        LedPatch b;
+        b.mode = OpMode::Blink;
+        b.on_ms = 250;
+        b.off_ms = 250;
+        sched.apply_patch(LedId::Disk1, b);
+
+        LedPatch r;
+        r.mode = OpMode::Breath;
+        sched.apply_patch(LedId::Disk1, r);
+
+        auto d = sched.get_desired(LedId::Disk1);
+        TEST_ASSERT_EQ(d.mode, OpMode::Breath);
+        TEST_ASSERT_EQ(d.on_ms, 1000);
+        TEST_ASSERT_EQ(d.off_ms, 1000);
+    });
+
+    test::run_test("Mode transition to blink from breath uses blink default, not inherited breath cycle", []() {
+        Scheduler sched({LedId::Disk1});
+
+        LedPatch r;
+        r.mode = OpMode::Breath;
+        r.on_ms = 1000;
+        r.off_ms = 1000;
+        sched.apply_patch(LedId::Disk1, r);
+
+        LedPatch b;
+        b.mode = OpMode::Blink;
+        sched.apply_patch(LedId::Disk1, b);
+
+        auto d = sched.get_desired(LedId::Disk1);
+        TEST_ASSERT_EQ(d.mode, OpMode::Blink);
+        TEST_ASSERT_EQ(d.on_ms, 500);
+        TEST_ASSERT_EQ(d.off_ms, 500);
+    });
+
+    test::run_test("Same-mode patch without timing keeps the existing cycle", []() {
+        Scheduler sched({LedId::Disk1});
+
+        LedPatch b;
+        b.mode = OpMode::Blink;
+        b.on_ms = 250;
+        b.off_ms = 250;
+        sched.apply_patch(LedId::Disk1, b);
+
+        LedPatch again;
+        again.mode = OpMode::Blink;
+        sched.apply_patch(LedId::Disk1, again);
+
+        auto d = sched.get_desired(LedId::Disk1);
+        TEST_ASSERT_EQ(d.mode, OpMode::Blink);
+        TEST_ASSERT_EQ(d.on_ms, 250);
+        TEST_ASSERT_EQ(d.off_ms, 250);
+    });
+
+    test::run_test("Timing without mode implies blink in the desired state", []() {
+        Scheduler sched({LedId::Disk1});
+
+        LedPatch on;
+        on.mode = OpMode::On;
+        sched.apply_patch(LedId::Disk1, on);
+
+        LedPatch t;
+        t.on_ms = 100;
+        t.off_ms = 100;
+        sched.apply_patch(LedId::Disk1, t);
+
+        auto d = sched.get_desired(LedId::Disk1);
+        TEST_ASSERT_EQ(d.mode, OpMode::Blink);
+        TEST_ASSERT_EQ(d.on_ms, 100);
+        TEST_ASSERT_EQ(d.off_ms, 100);
+    });
+
+    test::run_test("Off mode clears timing from the desired state", []() {
+        Scheduler sched({LedId::Disk1});
+
+        LedPatch b;
+        b.mode = OpMode::Blink;
+        b.on_ms = 250;
+        b.off_ms = 250;
+        sched.apply_patch(LedId::Disk1, b);
+
+        LedPatch off;
+        off.mode = OpMode::Off;
+        sched.apply_patch(LedId::Disk1, off);
+
+        auto d = sched.get_desired(LedId::Disk1);
+        TEST_ASSERT_EQ(d.mode, OpMode::Off);
+        TEST_ASSERT_EQ(d.on_ms, 0);
+        TEST_ASSERT_EQ(d.off_ms, 0);
+    });
+
+    test::run_test("Blink to off to blink sequence stays consistent", []() {
+        Scheduler sched({LedId::Disk1});
+
+        // blink with an explicit cycle
+        LedPatch b1;
+        b1.mode = OpMode::Blink;
+        b1.on_ms = 250;
+        b1.off_ms = 250;
+        sched.apply_patch(LedId::Disk1, b1);
+
+        auto batch1 = sched.generate_batch();
+        TEST_ASSERT(batch1.has_value());
+        TEST_ASSERT_EQ(batch1->operations.size(), 1U);
+        HardwareBatchResult r1;
+        r1.batch_id = batch1->batch_id;
+        r1.max_generation = batch1->max_generation;
+        r1.success = true;
+        r1.applied_states.push_back({LedId::Disk1, batch1->operations[0].target_state});
+        sched.on_batch_complete(r1);
+        TEST_ASSERT(!sched.has_dirty());
+
+        // off
+        LedPatch off;
+        off.mode = OpMode::Off;
+        sched.apply_patch(LedId::Disk1, off);
+        auto batch2 = sched.generate_batch();
+        TEST_ASSERT(batch2.has_value());
+        HardwareBatchResult r2;
+        r2.batch_id = batch2->batch_id;
+        r2.max_generation = batch2->max_generation;
+        r2.success = true;
+        r2.applied_states.push_back({LedId::Disk1, batch2->operations[0].target_state});
+        sched.on_batch_complete(r2);
+
+        // blink again without timing: must be a valid, non-zero cycle
+        LedPatch b2;
+        b2.mode = OpMode::Blink;
+        sched.apply_patch(LedId::Disk1, b2);
+        auto d = sched.get_desired(LedId::Disk1);
+        TEST_ASSERT_EQ(d.mode, OpMode::Blink);
+        TEST_ASSERT(d.on_ms + d.off_ms > 0);
+
+        auto batch3 = sched.generate_batch();
+        TEST_ASSERT(batch3.has_value());
+        // The batch must carry a complete, legal blink state (the original
+        // bug: this transition produced a zero-cycle or missing mode write).
+        auto& op3 = batch3->operations[0];
+        TEST_ASSERT(op3.patch.mode.has_value());
+        TEST_ASSERT_EQ(*op3.patch.mode, OpMode::Blink);
+        TEST_ASSERT(op3.target_state.on_ms + op3.target_state.off_ms > 0);
+
+        HardwareBatchResult r3;
+        r3.batch_id = batch3->batch_id;
+        r3.max_generation = batch3->max_generation;
+        r3.success = true;
+        r3.applied_states.push_back({LedId::Disk1, batch3->operations[0].target_state});
+        sched.on_batch_complete(r3);
+        TEST_ASSERT(!sched.has_dirty());
+        TEST_ASSERT(sched.get_desired(LedId::Disk1) == sched.get_applied(LedId::Disk1));
+    });
+
+    test::run_test("Fallback blink state with zero cycle is normalized", []() {
+        Scheduler sched({LedId::Disk1});
+
+        LedState fb;
+        fb.mode = OpMode::Blink;  // on_ms/off_ms left at 0 (unconfigured)
+        sched.set_fallback(LedId::Disk1, fb);
+
+        sched.apply_fallback(LedId::Disk1);
+
+        auto d = sched.get_desired(LedId::Disk1);
+        TEST_ASSERT_EQ(d.mode, OpMode::Blink);
+        TEST_ASSERT_EQ(d.on_ms, 500);
+        TEST_ASSERT_EQ(d.off_ms, 500);
+    });
+
     test::run_test("FLUSH barrier error propagation on hardware failure", []() {
         Scheduler sched({LedId::Disk1});
 

@@ -79,7 +79,7 @@ public:
         return states_[id];
     }
 
-    void apply(LedId id, const LedPatch& patch) override {
+    LedState apply(LedId id, const LedPatch& patch) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!is_supported_unlocked(id)) {
             throw HardwareException("unsupported LED: " + to_string(id));
@@ -94,7 +94,8 @@ public:
             throw HardwareException("injected countdown hardware apply failure for " + to_string(id));
         }
 
-        patch.apply_to(states_[id]);
+        // Same mode/timing resolution semantics as the real backend's planner.
+        states_[id] = resolve_target_state(states_[id], patch);
 
         Operation op;
         op.type = Operation::Type::Apply;
@@ -103,6 +104,8 @@ public:
         op.result_state = states_[id];
         op.timestamp = std::chrono::steady_clock::now();
         history_.push_back(op);
+
+        return states_[id];
     }
 
     // Failure injection helpers

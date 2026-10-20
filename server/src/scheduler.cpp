@@ -21,32 +21,28 @@ void Scheduler::set_fallback(LedId id, const LedState& fallback) {
     }
 }
 
+void Scheduler::calibrate(LedId id, const LedState& state) {
+    auto it = slots_.find(id);
+    if (it == slots_.end()) return;
+
+    // Once any update has been accepted, the desired state is client-owned;
+    // the verified readbacks of the first batch already establish the truth.
+    if (it->second.desired_generation != 0) return;
+
+    it->second.desired = normalize_led_state(state);
+    it->second.applied = it->second.desired;
+    it->second.dirty = false;
+}
+
 uint64_t Scheduler::apply_patch(LedId id, const LedPatch& patch) {
     auto it = slots_.find(id);
     if (it == slots_.end()) return current_generation_;
 
-    OpMode old_mode = it->second.desired.mode;
-    patch.apply_to(it->second.desired);
-
-    // If switching to breath mode without explicit timing, use breath default timing (1000/1000)
-    // rather than inheriting fast blink timing.
-    if (patch.mode && *patch.mode == OpMode::Breath && !patch.on_ms && !patch.off_ms &&
-        old_mode != OpMode::Breath) {
-        it->second.desired.on_ms = 1000;
-        it->second.desired.off_ms = 1000;
-    }
-    // If switching to blink mode without explicit timing, use blink default timing (500/500)
-    // rather than inheriting slow breath timing.
-    else if (patch.mode && *patch.mode == OpMode::Blink && !patch.on_ms && !patch.off_ms &&
-             old_mode != OpMode::Blink) {
-        it->second.desired.on_ms = 500;
-        it->second.desired.off_ms = 500;
-    }
-    else if ((it->second.desired.mode == OpMode::Blink || it->second.desired.mode == OpMode::Breath) &&
-             it->second.desired.on_ms + it->second.desired.off_ms == 0) {
-        it->second.desired.on_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
-        it->second.desired.off_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
-    }
+    // The shared resolver keeps the desired state canonical: mode inference
+    // (timing without mode implies blink), mode-switch default cycles and
+    // zeroed timing for off/on states all happen here, exactly as the
+    // hardware planner will resolve them.
+    it->second.desired = resolve_target_state(it->second.desired, patch);
     ++current_generation_;
     it->second.desired_generation = current_generation_;
     it->second.dirty = true;
@@ -57,12 +53,9 @@ uint64_t Scheduler::apply_fallback(LedId id) {
     auto it = slots_.find(id);
     if (it == slots_.end()) return current_generation_;
 
-    it->second.desired = it->second.fallback;
-    if ((it->second.desired.mode == OpMode::Blink || it->second.desired.mode == OpMode::Breath) &&
-        it->second.desired.on_ms + it->second.desired.off_ms == 0) {
-        it->second.desired.on_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
-        it->second.desired.off_ms = (it->second.desired.mode == OpMode::Blink) ? 500 : 1000;
-    }
+    // A fallback may legitimately be uncanonical (e.g. a blink state with no
+    // cycle in the config); normalize it the same way patches are resolved.
+    it->second.desired = normalize_led_state(it->second.fallback);
     ++current_generation_;
     it->second.desired_generation = current_generation_;
     it->second.dirty = true;

@@ -165,6 +165,98 @@ void run_i2c_backend_tests() {
         assert_ops_equal(ops, {make_op(ControllerOp::Type::SetBlink, 0, 0, 0, 0, 0, 300, 700)});
     });
 
+    test::run_test("plan: blink to off to blink without timing re-issues a legal blink", []() {
+        // The original field failure: after blink -> off, a mode-only blink
+        // patch must still produce a mode command with a non-zero cycle,
+        // regardless of the chip's retained (stale) cycle registers.
+        LedPatch p1;
+        p1.mode = OpMode::Blink;
+        p1.on_ms = 250;
+        p1.off_ms = 250;
+        auto on = make_state(OpMode::On, 200, RgbColor{255, 0, 0});
+        auto ops1 = plan_led_update(on, p1);
+        assert_ops_equal(ops1, {make_op(ControllerOp::Type::SetBlink, 0, 0, 0, 0, 0, 250, 250)});
+
+        // Off, with the chip retaining its 250/250 cycle registers.
+        auto blink = make_state(OpMode::Blink, 200, RgbColor{255, 0, 0}, 250, 250);
+        LedPatch p2;
+        p2.mode = OpMode::Off;
+        auto ops2 = plan_led_update(blink, p2);
+        assert_ops_equal(ops2, {make_op(ControllerOp::Type::OnOff, 0)});
+
+        // Blink again, no timing: default cycle, never zero, never the stale one.
+        LedPatch p3;
+        p3.mode = OpMode::Blink;
+        auto off_retained = make_state(OpMode::Off, 200, RgbColor{255, 0, 0}, 250, 250);
+        auto ops3 = plan_led_update(off_retained, p3);
+        TEST_ASSERT_EQ(ops3.size(), 1U);
+        TEST_ASSERT_EQ(ops3[0].type, ControllerOp::Type::SetBlink);
+        TEST_ASSERT(ops3[0].on_ms + ops3[0].off_ms > 0);
+        TEST_ASSERT_EQ(ops3[0].on_ms, 500);
+        TEST_ASSERT_EQ(ops3[0].off_ms, 500);
+    });
+
+    test::run_test("plan: entering breath from blink without timing uses breath default", []() {
+        auto current = make_state(OpMode::Blink, 200, RgbColor{255, 0, 0}, 250, 250);
+        LedPatch patch;
+        patch.mode = OpMode::Breath;
+
+        auto ops = plan_led_update(current, patch);
+        assert_ops_equal(ops, {make_op(ControllerOp::Type::SetBreath, 0, 0, 0, 0, 0, 1000, 1000)});
+    });
+
+    test::run_test("plan: entering blink from breath without timing uses blink default", []() {
+        auto current = make_state(OpMode::Breath, 200, RgbColor{255, 0, 0}, 1000, 1000);
+        LedPatch patch;
+        patch.mode = OpMode::Blink;
+
+        auto ops = plan_led_update(current, patch);
+        assert_ops_equal(ops, {make_op(ControllerOp::Type::SetBlink, 0, 0, 0, 0, 0, 500, 500)});
+    });
+
+    test::run_test("plan: timing without mode from on infers blink", []() {
+        auto current = make_state(OpMode::On, 200, RgbColor{255, 0, 0});
+        LedPatch patch;
+        patch.on_ms = 100;
+        patch.off_ms = 100;
+
+        auto ops = plan_led_update(current, patch);
+        assert_ops_equal(ops, {make_op(ControllerOp::Type::SetBlink, 0, 0, 0, 0, 0, 100, 100)});
+    });
+
+    test::run_test("plan: chip-retained timing in off state is ignored by the plan", []() {
+        // Readback after an off may carry the old cycle; planning a color
+        // change in off mode must not touch mode or timing.
+        auto current = make_state(OpMode::Off, 200, RgbColor{255, 0, 0}, 250, 250);
+        LedPatch patch;
+        patch.rgb = RgbColor{0, 255, 0};
+
+        auto ops = plan_led_update(current, patch);
+        assert_ops_equal(ops, {make_op(ControllerOp::Type::SetRgb, 0, 0, 255, 0)});
+    });
+
+    test::run_test("post-apply verification matches mode, color and active cycle", []() {
+        LedState expected = make_state(OpMode::Blink, 128, RgbColor{1, 2, 3}, 250, 250);
+        LedState ok = make_state(OpMode::Blink, 128, RgbColor{1, 2, 3}, 250, 250);
+        TEST_ASSERT(states_match_after_apply(expected, ok));
+
+        LedState wrong_mode = make_state(OpMode::Breath, 128, RgbColor{1, 2, 3}, 250, 250);
+        TEST_ASSERT(!states_match_after_apply(expected, wrong_mode));
+
+        LedState wrong_cycle = make_state(OpMode::Blink, 128, RgbColor{1, 2, 3}, 100, 250);
+        TEST_ASSERT(!states_match_after_apply(expected, wrong_cycle));
+
+        LedState wrong_color = make_state(OpMode::Blink, 128, RgbColor{1, 2, 4}, 250, 250);
+        TEST_ASSERT(!states_match_after_apply(expected, wrong_color));
+
+        // Off readback retains stale cycle registers: timing must not matter.
+        LedState off_expected = make_state(OpMode::Off, 128, RgbColor{1, 2, 3});
+        LedState off_retained = make_state(OpMode::Off, 128, RgbColor{1, 2, 3}, 250, 250);
+        TEST_ASSERT(states_match_after_apply(off_expected, off_retained));
+        LedState off_wrong_color = make_state(OpMode::Off, 128, RgbColor{9, 9, 9}, 250, 250);
+        TEST_ASSERT(!states_match_after_apply(off_expected, off_wrong_color));
+    });
+
     test::run_test("controller op description is stable", []() {
         TEST_ASSERT_EQ(describe_controller_op(make_op(ControllerOp::Type::OnOff, 1)),
                        std::string("mode=on"));

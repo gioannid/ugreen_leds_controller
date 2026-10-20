@@ -102,8 +102,12 @@ void HardwareWorker::worker_loop() {
 
             for (const auto& op : current_batch->operations) {
                 try {
-                    backend_->apply(op.id, op.patch);
-                    res.applied_states.push_back({op.id, op.target_state});
+                    // The backend returns the device state after the update
+                    // (verified by readback on real hardware). Recording it
+                    // — instead of the planned target — keeps the scheduler's
+                    // applied state honest: if the device ever drifts from
+                    // the plan, the next batch re-issues the correction.
+                    res.applied_states.push_back({op.id, backend_->apply(op.id, op.patch)});
                 } catch (const std::exception& ex) {
                     res.success = false;
                     res.failed_led = op.id;
