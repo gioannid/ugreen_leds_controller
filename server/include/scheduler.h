@@ -51,6 +51,11 @@ public:
         uint64_t desired_generation = 0;
         uint64_t applied_generation = 0;
         bool dirty = false;
+        // Set by init_to_fallback(): forces the next batch to carry a
+        // full-state write for this LED even when desired already equals the
+        // (assumed) applied state, so the configured fallback reaches the
+        // hardware at startup. Cleared once that write has completed.
+        bool init_write = false;
         std::string last_hardware_error;
         // Generation of the failed batch that produced last_hardware_error.
         // An error is stale (does not fail FLUSH barriers) once the desired
@@ -75,6 +80,15 @@ public:
     // hardware write is triggered, and it is a no-op once any patch has
     // been accepted for the LED (the normal self-healing path takes over).
     void calibrate(LedId id, const LedState& state);
+
+    // Startup init-to-fallback: for every LED with an explicitly configured
+    // fallback (present in explicit_fallbacks), sets the desired state to
+    // that fallback and marks it for a forced full-state hardware write (see
+    // Slot::init_write), so a fresh start never shows stale firmware state.
+    // LEDs without an explicit entry are left untouched: the caller is
+    // expected to calibrate them from the panel instead of overwriting
+    // whatever the firmware is showing.
+    void init_to_fallback(const std::map<LedId, LedState>& explicit_fallbacks);
 
     // State queries
     LedState get_desired(LedId id) const;

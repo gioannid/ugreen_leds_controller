@@ -465,6 +465,11 @@ bool load_server_config(const std::string& path, ServerConfig& out, std::string&
                     return false;
                 }
                 cfg.backend = val;
+            } else if (key == "init_to_fallback") {
+                if (!parse_bool_field(val, cfg.init_to_fallback)) {
+                    error = "line " + std::to_string(line_no) + ": invalid init_to_fallback '" + val + "'";
+                    return false;
+                }
             } else {
                 error = "line " + std::to_string(line_no) + ": unknown server key '" + key + "'";
                 return false;

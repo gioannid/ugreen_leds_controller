@@ -342,6 +342,7 @@ Policy:
   - Operations targeting multiple LEDs (such as `all`) are atomic and all-or-nothing: the connection must be able to acquire or preempt every target LED. If any LED fails the priority or authorization check, the entire command is rejected without partial state mutations.
 - **Fallback state**:
   - On `RESET` or connection disconnect, apply a configured per-LED fallback state. Defaulting to a fallback prevents activity indicators from remaining indefinitely illuminated in an orphaned state.
+  - By default the service also applies the fallback state at startup to every LED that has an explicitly configured fallback (so a fresh start never shows stale firmware state where intent was declared). LEDs without an explicit fallback — and all LEDs when no fallback is configured, or when `--no-init-to-fallback` / `init_to_fallback=false` is set — are never written at startup; startup only reads the panel and adopts its current state as the baseline.
 
 ## 7. Scheduling and rapid updates
 

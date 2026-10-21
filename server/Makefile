@@ -1,5 +1,7 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -pedantic -pthread -Iinclude -Isrc -I../cli
+# -MMD -MP emit .d header-dependency files so header edits trigger rebuilds
+# (stale vtables across translation units have bitten us before).
+CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -pedantic -pthread -Iinclude -Isrc -I../cli -MMD -MP
 
 SERVER_SRCS = src/main.cpp \
               src/led_state.cpp \
@@ -86,7 +88,11 @@ hw_monkey_test: $(HW_MONKEY_TEST_OBJ)
 test: test_runner
 	./test_runner
 
+ALL_OBJS = $(SERVER_OBJS) $(COMMON_OBJS) $(TEST_OBJS) $(HW_TEST_OBJS) $(HW_MONKEY_TEST_OBJ) examples/client.o
+
+-include $(ALL_OBJS:.o=.d)
+
 clean:
-	rm -f src/*.o tests/*.o tests/hw/*.o examples/*.o $(COMMON_OBJS) ugreen_leds_server test_runner example_client hw_smoke_test hw_monkey_test
+	rm -f src/*.o tests/*.o tests/hw/*.o examples/*.o $(COMMON_OBJS) src/*.d tests/*.d tests/hw/*.d examples/*.d *.d ugreen_leds_server test_runner example_client hw_smoke_test hw_monkey_test
 
 .PHONY: all test clean

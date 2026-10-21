@@ -35,6 +35,7 @@ int main(int argc, char* argv[]) {
     bool cli_verbose = false;
     bool cli_no_unix = false;
     bool cli_no_tcp = false;
+    std::optional<bool> cli_init_to_fallback;
     bool cli_help = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -61,6 +62,10 @@ int main(int argc, char* argv[]) {
             cli_no_unix = true;
         } else if (arg == "--no-tcp") {
             cli_no_tcp = true;
+        } else if (arg == "--init-to-fallback") {
+            cli_init_to_fallback = true;
+        } else if (arg == "--no-init-to-fallback") {
+            cli_init_to_fallback = false;
         } else if (arg == "--help" || arg == "-h") {
             cli_help = true;
         } else {
@@ -82,7 +87,9 @@ int main(int argc, char* argv[]) {
                     << "  --verbose           Enable debug-level logging for troubleshooting\n"
                     << "  --no-unix           Disable Unix socket listener\n"
                     << "  --no-tcp            Disable TCP listener\n"
-                   << "  --help              Display this help message\n"
+                    << "  --init-to-fallback  Write the configured [fallback] state to all LEDs at startup (default)\n"
+                    << "  --no-init-to-fallback  Adopt the panel's current state at startup instead (no write)\n"
+                    << "  --help              Display this help message\n"
                   << "\nCommand-line options override values from --config.\n"
                   << "Without --config a permissive local-only development policy is used;\n"
                   "production deployments must configure an explicit access policy.\n";
@@ -107,6 +114,7 @@ int main(int argc, char* argv[]) {
     if (cli_no_unix) config.transport.enable_unix_socket = false;
     if (cli_no_tcp) config.transport.enable_tcp = false;
     if (cli_backend) config.backend = *cli_backend;
+    if (cli_init_to_fallback) config.init_to_fallback = *cli_init_to_fallback;
     if (config.backend != "fake" && config.backend != "i2c") {
         std::cerr << "Invalid backend '" << config.backend << "' (expected fake or i2c)\n";
         return 1;
@@ -183,6 +191,7 @@ int main(int argc, char* argv[]) {
                           std::to_string(config.transport.tcp_port));
     }
     ugreen::log::info("  scheduler interval: " + std::to_string(config.transport.scheduler_interval_ms) + " ms");
+    ugreen::log::info("  init-to-fallback: " + std::string(config.init_to_fallback ? "on" : "off"));
     ugreen::log::info("  access rules (" + std::to_string(config.access_rules.size()) + "):");
     for (const auto& rule : config.access_rules) {
         std::string leds_str = rule.all_leds ? "all" : "";

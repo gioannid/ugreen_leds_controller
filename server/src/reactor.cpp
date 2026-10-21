@@ -15,6 +15,12 @@
 
 namespace ugreen {
 
+// Total startup calibration read attempts per LED (initial + retries). A
+// transient I2C glitch on the first read must not leave the scheduler with
+// its "everything is off" assumption, so failed reads are retried a bounded
+// number of times before giving up.
+constexpr int kMaxCalibrationAttempts = 3;
+
 static bool set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) return false;
@@ -48,15 +54,44 @@ Reactor::~Reactor() {
 bool Reactor::init() {
     worker_.start();
 
-    // Startup calibration: read every supported LED so the scheduler's
-    // baseline is the actual hardware state, not the "everything is off"
-    // assumption. Without this, a first SET that resolves to the assumed
-    // state (e.g. mode=off while the firmware has the LED lit) would be a
-    // no-op batch and the scheduler would silently disagree with the panel.
-    // These reads are internal (client id 0) and bypass the client-facing
-    // hardware-read rate limit.
+    // Startup: LEDs with an explicitly configured [fallback] entry are
+    // rewritten to that fallback (so a fresh start never shows stale
+    // firmware state); every other LED is only read, adopting its current
+    // state as the scheduler's baseline (legacy calibration). Without any
+    // [fallback] entry the startup is purely read-only.
+    std::vector<LedId> calibration_leds;
+    size_t init_count = 0;
     for (auto led : worker_.capabilities().supported_leds) {
-        worker_.submit_read(HardwareReadRequest{kCalibrationClientId, 0, led});
+        if (config_.init_to_fallback && config_.fallbacks.count(led)) {
+            ++init_count;
+        } else {
+            calibration_leds.push_back(led);
+        }
+    }
+
+    if (init_count) {
+        // The forced full-state write (Scheduler::init_write) is picked up
+        // by the first scheduler tick; the verified post-apply states it
+        // produces become the scheduler's baseline.
+        scheduler_.init_to_fallback(config_.fallbacks);
+        log::info("init-to-fallback: writing configured fallback state to " +
+                  std::to_string(init_count) + " LED(s) at startup");
+    }
+
+    if (!calibration_leds.empty()) {
+        // Reading the panel makes the scheduler's baseline the actual
+        // hardware state, not the "everything is off" assumption. Without
+        // this, a first SET that resolves to the assumed state (e.g.
+        // mode=off while the firmware has the LED lit) would be a no-op
+        // batch and the scheduler would silently disagree with the panel.
+        // These reads are internal (client id 0) and bypass the
+        // client-facing hardware-read rate limit.
+        for (auto led : calibration_leds) {
+            calibration_attempts_[led] = 1;
+            worker_.submit_read(HardwareReadRequest{kCalibrationClientId, 0, led});
+        }
+        log::info("startup calibration: reading state of " +
+                  std::to_string(calibration_leds.size()) + " LED(s) from the panel");
     }
 
     if (config_.transport.enable_unix_socket) {
@@ -358,8 +393,20 @@ void Reactor::handle_worker_wakeup() {
                                   " off_ms=" + std::to_string(r.state.off_ms)
                                 : ""));
             } else {
-                log::warn("startup calibration read of " + to_string(r.id) + " failed: " +
-                          r.error_message + " (scheduler keeps its assumption until the first write)");
+                auto it = calibration_attempts_.find(r.id);
+                if (it != calibration_attempts_.end() && it->second < kMaxCalibrationAttempts) {
+                    // Transient I2C glitch: retry the read so a one-off
+                    // failure does not leave the scheduler assuming the LED
+                    // is in its power-on default state.
+                    ++it->second;
+                    log::warn("startup calibration read of " + to_string(r.id) + " failed: " +
+                              r.error_message + " (retry " + std::to_string(it->second) + "/" +
+                              std::to_string(kMaxCalibrationAttempts) + ")");
+                    worker_.submit_read(HardwareReadRequest{kCalibrationClientId, 0, r.id});
+                } else {
+                    log::warn("startup calibration read of " + to_string(r.id) + " failed: " +
+                              r.error_message + " (scheduler keeps its assumption until the first write)");
+                }
             }
             continue;
         }

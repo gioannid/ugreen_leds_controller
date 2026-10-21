@@ -81,6 +81,8 @@ private:
     uint64_t next_client_id_ = 1;
     std::map<uint64_t, ClientSession> clients_;
     std::map<int, size_t> rule_connection_counts_;
+    // Startup calibration read attempts per LED (bounded retry on failure).
+    std::map<LedId, int> calibration_attempts_;
     double hw_read_tokens_ = 0;
     std::chrono::steady_clock::time_point hw_read_refill_time_;
     std::chrono::steady_clock::time_point last_tick_time_;

@@ -1,4 +1,5 @@
 #include "i2c_led_backend.h"
+#include "logger.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -21,6 +22,8 @@ constexpr int kMaxReadAttempts = 5;       // status read attempts per read
 constexpr int kPreWriteDelayUs = 500;     // settle time before a write
 constexpr int kPostWriteStatusDelayMs = 2; // wait before querying the result register
 constexpr int kMaxWriteAttempts = 5;      // write + verify attempts per command
+constexpr int kMaxApplyAttempts = 3;      // whole apply (read-plan-write-verify) attempts
+constexpr int kApplyRetryDelayMs = 50;    // delay between whole-apply attempts
 
 // The server LedId/OpMode enumerations and the CLI led_type_t/op_mode_t
 // enumerations use identical values and ordering.
@@ -256,6 +259,32 @@ LedState I2cLedBackend::apply(LedId id, const LedPatch& patch) {
         throw HardwareException("unsupported LED: " + to_string(id));
     }
 
+    // A single I2C glitch (chip not answering a status read, a write not
+    // acknowledged in its result register) must not fail the batch — and
+    // with it the client's FLUSH barrier — on the first occurrence: retry
+    // the whole read-plan-write-verify sequence a bounded number of times.
+    // The retry is convergent: plan_led_update() diffs the freshly read
+    // state against the target, so commands a previous attempt already took
+    // effect on are not re-issued.
+    std::string last_error;
+    for (int attempt = 1; attempt <= kMaxApplyAttempts; ++attempt) {
+        if (attempt > 1) {
+            ::usleep(kApplyRetryDelayMs * 1000);
+        }
+        try {
+            return apply_once(id, patch);
+        } catch (const HardwareException& ex) {
+            last_error = ex.what();
+            if (attempt < kMaxApplyAttempts) {
+                log::debug("apply of LED " + to_string(id) + " attempt " + std::to_string(attempt) +
+                           " failed: " + last_error + " (retrying)");
+            }
+        }
+    }
+    throw HardwareException(last_error);
+}
+
+LedState I2cLedBackend::apply_once(LedId id, const LedPatch& patch) {
     auto current_raw = read_status_robust(to_cli_led(id));
     if (!current_raw.is_available) {
         throw HardwareException("read of LED " + to_string(id) +

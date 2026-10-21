@@ -410,12 +410,17 @@ UNKNOWN_COMMAND verb=GET`, `INVALID_ARGUMENT field=request_id`, …). Use
 ### 12.1 One-shot batch with `socat` (recommended)
 
 ```bash
-printf 'HELLO 1 1\nCAPS 2\nSET 3 disk1 mode=on rgb=0,255,0 brightness=128\nFLUSH 4\n' \
-  | socat -t 1 - TCP:127.0.0.1:39001
+{ printf 'HELLO 1 1\nCAPS 2\nSET 3 disk1 mode=on rgb=0,255,0 brightness=128\nFLUSH 4\n'
+  sleep 1
+} | socat - TCP:127.0.0.1:39001
 ```
 
-`-t 1` makes socat close one second after the last received byte, so the
-command prints the responses and exits:
+Keep the pipe open (the `sleep`) until the responses have been read: EOF on
+the socket is a **disconnect** for the server, so a client that closes early
+loses late responses — notably `FLUSH` answers, which arrive when the
+hardware write completes, not when the command is accepted. After the sleep
+the pipe EOFs, socat closes, and the command exits with the responses on
+stdout:
 
 ```text
 OK 1 HELLO version=1 access=127.0.0.1
@@ -424,13 +429,14 @@ OK 3 ACCEPTED generation=1
 OK 4 FLUSH
 ```
 
-From another machine, substitute the NAS's LAN address:
-`socat -t 1 - TCP:192.168.178.20:39001`.
+From another machine, substitute the NAS's LAN address
+(`socat - TCP:192.168.178.20:39001`).
 
 ### 12.2 One-shot batch with `nc`
 
-Some `nc` variants exit on stdin EOF before printing responses; keeping the
-pipe open for a short `sleep` sidesteps that:
+The same pattern works with `nc` (the `sleep` keeps stdin open until the
+responses have been printed; some `nc` variants exit immediately on stdin
+EOF):
 
 ```bash
 { printf 'HELLO 1 1\nCAPS 2\nSET 3 disk1 mode=on\n'; sleep 1; } \

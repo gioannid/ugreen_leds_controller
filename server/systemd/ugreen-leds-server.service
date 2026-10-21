@@ -4,9 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-# Dedicated service account; grant it access to the I2C device node only.
+# Some service account; make sure it is part of i2c group (usermod -aG i2c ugreen-leds). 
+# Grant it access to the I2C device node only.
 User=ugreen-leds
 Group=ugreen-leds
+SupplementaryGroups=i2c
 # Log messages go to stdout (journal) by default. To log to a file instead,
 # add --log-file /var/log/ugreen-leds-server.log; --verbose enables
 # debug-level logging for troubleshooting.

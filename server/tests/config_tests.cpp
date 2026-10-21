@@ -262,6 +262,24 @@ void run_config_tests() {
         TEST_ASSERT(!ok);
     });
 
+    test::run_test("init_to_fallback: defaults to true, parses booleans, rejects invalid values", []() {
+        ServerConfig cfg;
+        std::string err;
+
+        TEST_ASSERT(cfg.init_to_fallback);  // built-in default
+
+        bool ok = load_ok("[server]\ninit_to_fallback=false\n", cfg, err);
+        TEST_ASSERT(ok);
+        TEST_ASSERT(!cfg.init_to_fallback);
+
+        ok = load_ok("[server]\ninit_to_fallback=yes\n", cfg, err);
+        TEST_ASSERT(ok);
+        TEST_ASSERT(cfg.init_to_fallback);
+
+        ok = load_ok("[server]\ninit_to_fallback=maybe\n", cfg, err);
+        TEST_ASSERT(!ok);
+    });
+
     test::run_test("Dev defaults provide permissive local policy", []() {
         ServerConfig cfg;
         apply_dev_defaults(cfg);

@@ -65,6 +65,8 @@ public:
             throw HardwareException("unsupported LED: " + to_string(id));
         }
 
+        ++read_attempts_[id];
+
         if (fail_all_reads_ || fail_reads_leds_.count(id)) {
             throw HardwareException("injected hardware read failure for " + to_string(id));
         }
@@ -171,6 +173,14 @@ public:
         return count;
     }
 
+    // Total read() invocations for the LED, including injected failures —
+    // unlike history(), which only records successful operations.
+    size_t read_attempts(LedId id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = read_attempts_.find(id);
+        return it == read_attempts_.end() ? 0 : it->second;
+    }
+
     size_t total_apply_count() const {
         std::lock_guard<std::mutex> lock(mutex_);
         size_t count = 0;
@@ -200,6 +210,7 @@ private:
     std::set<LedId> fail_applies_leds_;
     std::set<LedId> fail_reads_leds_;
     int fail_apply_countdown_ = 0;
+    std::map<LedId, size_t> read_attempts_;
 };
 
 } // namespace ugreen

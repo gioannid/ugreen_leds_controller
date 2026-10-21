@@ -73,6 +73,9 @@ public:
     const std::string& device_path() const { return device_path_; }
 
 private:
+    // One read-plan-write-verify cycle; apply() wraps it in a bounded retry
+    // so a transient I2C glitch does not fail the batch right away.
+    LedState apply_once(LedId id, const LedPatch& patch);
     ugreen_leds_t::led_data_t read_status_robust(ugreen_leds_t::led_type_t id);
     bool execute_with_verify(ugreen_leds_t::led_type_t id, const ControllerOp& op);
 

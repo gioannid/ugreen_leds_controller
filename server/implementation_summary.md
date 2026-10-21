@@ -5,7 +5,7 @@
 ```bash
 cd server/
 make clean && make     # Builds ugreen_leds_server, test_runner, example_client, hw_smoke_test, hw_monkey_test
-make test              # Runs the full test suite (91 tests, all pass)
+make test              # Runs the full test suite (100 tests, all pass)
 ```
 
 `hw_smoke_test` and `hw_monkey_test` are separate, statically linked binaries
@@ -13,6 +13,12 @@ for the production machine with the real LED hardware (see Stage 4 below).
 `hw_monkey_test` needs a *running* server with `backend=i2c` and drives one
 LED through many random transitions, verifying every step with
 `GET source=hardware`.
+
+The build tracks header dependencies (`.d` files via `-MMD -MP`), so editing
+a header rebuilds exactly the translation units that include it — a stale
+build after a header-only change can silently mix old and new class layouts
+across objects (vtables are weak symbols shared process-wide), which is
+nasty to debug.
 
 ## What was built
 
@@ -128,17 +134,17 @@ no transition was ever verified as a whole. The hardening:
 - `backend` config key: parsing, rejection of unknown backends, defaults.
 - Device-discovery sanity and an environment-aware construction test: on a host without the UGREEN chip the backend must fail cleanly; on the production host it must come up, report LEDs, and reject non-present ones. The same test suite therefore passes on both machines.
 
-### Test Suite (92 tests)
+### Test Suite (100 tests)
 
 | Test File | Tests |
 |---|---|
 | [`tests/protocol_tests.cpp`](tests/protocol_tests.cpp) | Fragmented/combined TCP messages, line overflow, all verb parsing, duplicate fields, timing constraints, response serialization |
 | [`tests/fake_backend_tests.cpp`](tests/fake_backend_tests.cpp) | Capabilities, apply/read, unsupported LED exception, injected failures |
-| [`tests/config_tests.cpp`](tests/config_tests.cpp) | Valid full config, most-specific prefix selection, local-only Unix rule, duplicate network/name rejection, missing source, invalid values, unknown sections/keys, dev defaults, IPv6 parsing, permission helpers, logging keys (`log_file`, `verbose`) |
+| [`tests/config_tests.cpp`](tests/config_tests.cpp) | Valid full config, most-specific prefix selection, local-only Unix rule, duplicate network/name rejection, missing source, invalid values, unknown sections/keys, dev defaults, IPv6 parsing, permission helpers, logging keys (`log_file`, `verbose`), `init_to_fallback` default/parse/rejection |
 | [`tests/logger_tests.cpp`](tests/logger_tests.cpp) | Level gating (info default, debug with verbose), screen/file targets, line format and timestamp, append across restarts, unopenable-file failure, pre-init no-op |
 | [`tests/ownership_tests.cpp`](tests/ownership_tests.cpp) | Implicit acquisition, priority preemption/rejection, atomic multi-LED, RESET, disconnect release |
-| [`tests/scheduler_tests.cpp`](tests/scheduler_tests.cpp) | Update coalescing (20→1 write), no-op suppression, short-flash coalescence, FLUSH barrier success/failure |
-| [`tests/integration_tests.cpp`](tests/integration_tests.cpp) | Full end-to-end over Unix socket (HELLO→CAPS→SET→GET→FLUSH→GET→RESET); TCP multi-client priority preemption; `reply=none` suppression |
+| [`tests/scheduler_tests.cpp`](tests/scheduler_tests.cpp) | Update coalescing (20→1 write), no-op suppression, short-flash coalescence, FLUSH barrier success/failure, init-to-fallback forced full-state write (incl. retry after hardware failure, unconfigured LEDs left untouched) |
+| [`tests/integration_tests.cpp`](tests/integration_tests.cpp) | Full end-to-end over Unix socket (HELLO→CAPS→SET→GET→FLUSH→GET→RESET); TCP multi-client priority preemption; `reply=none` suppression; startup calibration (opt-out) and startup init-to-fallback reset a firmware-lit LED to the configured fallback; read-only startup without any `[fallback]` entry; bounded retry of failed startup calibration reads |
 | [`tests/access_tests.cpp`](tests/access_tests.cpp) | No-match denial, LED restriction, verb restriction, priority ceiling + stronger-rule preemption, per-rule connection limit + release, server-wide connection limit, command rate limit with refill, hardware-read rate limit, slow-client backpressure disconnect |
 | [`tests/stress_tests.cpp`](tests/stress_tests.cpp) | 1000-connection churn with `VmRSS` growth check (< 32 MB), 6-thread sustained parallel load, hardware failure storm (100 failing FLUSH rounds then recovery) |
 | [`tests/i2c_backend_tests.cpp`](tests/i2c_backend_tests.cpp) | Stage 4 without hardware: `plan_led_update()` command planning, controller-op descriptions, device discovery sanity, environment-aware backend construction, `backend` config parsing and rejection cases |
@@ -164,7 +170,9 @@ The implementation follows the ARCHITECTURE.md design:
 - **Limits**: per-rule and server-wide connection caps (`AUTH_FAILED reason=connection_limit|server_limit`), per-connection token-bucket command rate limit (burst = rate), server-wide token bucket for `GET source=hardware` (`RATE_LIMITED`). Rate 0 disables the limit.
 - **Backpressure**: each session has a bounded send queue (`kMaxQueuedOutput` = 32 KiB). The reactor keeps reading input (bounded by the 8 KiB recv buffer and the TCP window) and registers `POLLOUT` only while the queue is non-empty so responses drain as the client reads. A client that never consumes output grows its queue until overflow, at which point the server drops the connection; the service stays responsive to other clients. Registering `POLLOUT` unconditionally would make `poll()` return immediately for every idle-but-writable client, starving the scheduler's time-based ticks and busy-spinning the reactor.
 - **Stale hardware errors**: a failed batch records `error_generation`; FLUSH barriers are failed only by errors at or below the current desired generation, so a retry in flight does not poison later barriers.
-- **Configuration**: `[server]` transport/limit settings, `[access.<name>]` rules (source, leds, verbs, priority, max_connections), `[fallback]` per-LED state. Without config (or with no rules) the server applies development defaults: local Unix + loopback access to all LEDs at priority 0 — documented as unsafe for production.
+- **Init-to-fallback at startup** (`init_to_fallback`, default `true`; `--no-init-to-fallback` / `init_to_fallback=false` to opt out): on startup the server writes the configured `[fallback]` state to every LED that has an **explicit** `[fallback]` entry, so a fresh start never shows stale firmware state — but only where the operator declared intent. LEDs without an entry are never written at startup: the server calibrates them (reads the panel, adopts its state as the baseline, writes nothing), and with no `[fallback]` entries at all the startup is purely read-only, exactly like the legacy calibration. The init write is a forced full-state write per LED (the scheduler's `init_write` flag makes the batch carry every field even when the fallback matches the scheduler's initial assumption), and the verified post-apply states become the scheduler's baseline. With the switch disabled, the read-only calibration applies to every LED. A failed init write retries as a full-state write, and its error becomes stale for FLUSH barriers once client activity has advanced the global generation (a pending startup task must not keep failing barriers whose own updates are what is pending).
+- **Transient hardware glitch resilience**: the I2C backend retries the whole apply (read-plan-write-verify) up to 3 times with a 50 ms gap — a single I2C glitch (chip not answering the post-write status read, a write not acknowledged) no longer fails the batch and the client's FLUSH barrier on the first occurrence. The retry is convergent: the planner diffs the freshly read state against the target, so commands a previous attempt already took effect on are not re-issued. Failed startup calibration reads are retried the same way (3 total per LED) so a one-off read failure does not leave the scheduler with its "everything is off" assumption.
+- **Configuration**: `[server]` transport/limit settings, `[access.<name>]` rules (source, leds, verbs, priority, max_connections), `[fallback]` per-LED state, `init_to_fallback` startup switch. Without config (or with no rules) the server applies development defaults: local Unix + loopback access to all LEDs at priority 0 — documented as unsafe for production.
 - **Logging**: leveled, thread-safe logging for production observability and troubleshooting. Info-level and above (startup/shutdown, listener bind results, connections accepted/rejected, authentication, authorization violations, hardware failures) are on by default and go to the screen (stdout, captured by the journal); `--verbose` / `verbose=true` adds debug-level detail (per-command processing, rate-limiting, scheduler batches, hardware read/write results, protocol errors with the offending line). `--log-file` / `log_file=` redirects the log to a file (append mode, per-line flush); an unopenable file aborts startup. Line format: `2026-10-17T10:15:30.123Z [INFO] message`.
 - **Deployment**: systemd unit with a dedicated user, runtime directory, socket file mode 0700, device access to the I2C bus, and standard hardening; `--lock-file` enforces a single instance.
 

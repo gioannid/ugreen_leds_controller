@@ -293,17 +293,19 @@ void run_integration_tests() {
         unlink(sock_path.c_str());
     });
 
-    test::run_test("Startup calibration: first off transition reaches a firmware-lit LED", []() {
+    test::run_test("Startup calibration (init_to_fallback=off): first off transition reaches a firmware-lit LED", []() {
         // Simulates a NAS whose firmware already has a LED lit when the
-        // server starts. The scheduler must not assume "everything is off":
-        // the very first SET mode=off has to reach the hardware.
+        // server starts, with init-to-fallback disabled. The scheduler must
+        // not assume "everything is off": the very first SET mode=off has to
+        // reach the hardware.
         std::string sock_path = "/tmp/test_ugreen_leds_cal_" + std::to_string(getpid()) + ".sock";
 
-        ReactorConfig config;
-        config.unix_socket_path = sock_path;
-        config.enable_unix_socket = true;
-        config.enable_tcp = false;
-        config.scheduler_interval_ms = 10;
+        ServerConfig config;
+        config.transport.unix_socket_path = sock_path;
+        config.transport.enable_unix_socket = true;
+        config.transport.enable_tcp = false;
+        config.transport.scheduler_interval_ms = 10;
+        config.init_to_fallback = false;
 
         auto backend = std::make_unique<FakeLedBackend>();
         LedState lit;
@@ -349,6 +351,166 @@ void run_integration_tests() {
         TEST_ASSERT(ap.find("mode=off") != std::string::npos);
 
         close(client_fd);
+        reactor.stop();
+        unlink(sock_path.c_str());
+    });
+
+    test::run_test("Startup init-to-fallback (default): firmware-lit LED is reset to the configured fallback", []() {
+        // Simulates a NAS whose firmware already has a LED lit when the
+        // server starts. With init-to-fallback enabled (the default) the
+        // startup must write the configured fallback to the panel, and the
+        // scheduler's baseline must end up equal to that fallback.
+        std::string sock_path = "/tmp/test_ugreen_leds_init_" + std::to_string(getpid()) + ".sock";
+
+        ServerConfig config;
+        config.transport.unix_socket_path = sock_path;
+        config.transport.enable_unix_socket = true;
+        config.transport.enable_tcp = false;
+        config.transport.scheduler_interval_ms = 10;
+        // config.init_to_fallback keeps its built-in default: true
+
+        LedState fb;
+        fb.mode = OpMode::On;
+        fb.brightness = 120;
+        fb.rgb = RgbColor{0, 128, 255};
+        config.fallbacks[LedId::Disk1] = fb;
+
+        auto backend = std::make_unique<FakeLedBackend>();
+        LedState lit;
+        lit.mode = OpMode::On;
+        lit.brightness = 200;
+        lit.rgb = RgbColor{0, 255, 0};  // stale firmware state, must be erased
+        backend->set_led_state(LedId::Disk1, lit);
+
+        Reactor reactor(config, std::move(backend));
+        TEST_ASSERT(reactor.init());
+
+        // Let the startup init batch reach the (fake) hardware.
+        for (int i = 0; i < 10; ++i) reactor.poll_once(20);
+
+        int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        set_socket_timeout(client_fd);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+        TEST_ASSERT(connect(client_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        reactor.poll_once(10);
+
+        auto cmd = [&](const std::string& line) {
+            write_all(client_fd, line + "\n");
+            for (int i = 0; i < 8; ++i) reactor.poll_once(20);
+            return read_line_from_fd(client_fd);
+        };
+
+        TEST_ASSERT(cmd("HELLO 1 1").rfind("OK 1 HELLO", 0) == 0);
+
+        // The panel now shows the fallback, not the firmware state.
+        std::string hw = cmd("GET 2 disk1 source=hardware");
+        TEST_ASSERT(hw.find("mode=on") != std::string::npos);
+        TEST_ASSERT(hw.find("brightness=120") != std::string::npos);
+        TEST_ASSERT(hw.find("rgb=0,128,255") != std::string::npos);
+        std::string ap = cmd("GET 3 disk1 source=applied");
+        TEST_ASSERT(ap.find("brightness=120") != std::string::npos);
+        TEST_ASSERT(ap.find("rgb=0,128,255") != std::string::npos);
+        std::string de = cmd("GET 4 disk1 source=desired");
+        TEST_ASSERT(de.find("brightness=120") != std::string::npos);
+        TEST_ASSERT(de.find("rgb=0,128,255") != std::string::npos);
+
+        close(client_fd);
+        reactor.stop();
+        unlink(sock_path.c_str());
+    });
+
+    test::run_test("Startup without [fallback]: panel state is adopted, nothing is written", []() {
+        // A NAS whose firmware has a LED lit and where no [fallback] entry is
+        // configured at all. Even with init-to-fallback enabled (the default)
+        // the server must not write to the panel at startup — it reads the
+        // panel and adopts its current state (legacy behavior).
+        std::string sock_path = "/tmp/test_ugreen_leds_nofb_" + std::to_string(getpid()) + ".sock";
+
+        ServerConfig config;
+        config.transport.unix_socket_path = sock_path;
+        config.transport.enable_unix_socket = true;
+        config.transport.enable_tcp = false;
+        config.transport.scheduler_interval_ms = 10;
+        // init_to_fallback keeps its built-in default (true); config.fallbacks
+        // stays empty.
+
+        auto backend = std::make_unique<FakeLedBackend>();
+        LedState lit;
+        lit.mode = OpMode::On;
+        lit.brightness = 200;
+        lit.rgb = RgbColor{0, 255, 0};
+        backend->set_led_state(LedId::Disk1, lit);
+
+        auto* backend_ptr = backend.get();
+        Reactor reactor(config, std::move(backend));
+        TEST_ASSERT(reactor.init());
+
+        // Let the startup calibration reads settle.
+        for (int i = 0; i < 10; ++i) reactor.poll_once(20);
+
+        // No startup write: the firmware state is left untouched on the panel.
+        TEST_ASSERT_EQ(backend_ptr->total_apply_count(), 0U);
+        auto hw_state = backend_ptr->get_internal_state(LedId::Disk1);
+        TEST_ASSERT_EQ(hw_state.mode, OpMode::On);
+        TEST_ASSERT_EQ(hw_state.rgb.g, 255);
+
+        int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        set_socket_timeout(client_fd);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+        TEST_ASSERT(connect(client_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        reactor.poll_once(10);
+
+        auto cmd = [&](const std::string& line) {
+            write_all(client_fd, line + "\n");
+            for (int i = 0; i < 8; ++i) reactor.poll_once(20);
+            return read_line_from_fd(client_fd);
+        };
+
+        TEST_ASSERT(cmd("HELLO 1 1").rfind("OK 1 HELLO", 0) == 0);
+
+        // The scheduler adopted the panel state as its baseline.
+        std::string de = cmd("GET 2 disk1 source=desired");
+        TEST_ASSERT(de.find("mode=on") != std::string::npos);
+        TEST_ASSERT(de.find("rgb=0,255,0") != std::string::npos);
+        std::string ap = cmd("GET 3 disk1 source=applied");
+        TEST_ASSERT(ap.find("mode=on") != std::string::npos);
+
+        close(client_fd);
+        reactor.stop();
+        unlink(sock_path.c_str());
+    });
+
+    test::run_test("Startup calibration read failure is retried a bounded number of times", []() {
+        // A transient I2C glitch on the initial calibration read must be
+        // retried a bounded number of times (3 total per LED) instead of
+        // either hammering the bus or giving up after one failure.
+        std::string sock_path = "/tmp/test_ugreen_leds_calr_" + std::to_string(getpid()) + ".sock";
+
+        ServerConfig config;
+        config.transport.unix_socket_path = sock_path;
+        config.transport.enable_unix_socket = true;
+        config.transport.enable_tcp = false;
+        config.transport.scheduler_interval_ms = 10;
+        // No fallbacks: every LED is calibrated at startup.
+
+        auto backend = std::make_unique<FakeLedBackend>();
+        backend->inject_read_failure(true);  // every read fails
+
+        auto* backend_ptr = backend.get();
+        Reactor reactor(config, std::move(backend));
+        TEST_ASSERT(reactor.init());
+
+        // Give every retry round-trip a tick.
+        for (int i = 0; i < 30; ++i) reactor.poll_once(20);
+
+        // Initial read + bounded retries: more than one attempt, exactly 3.
+        TEST_ASSERT(backend_ptr->read_attempts(LedId::Disk1) >= 2);
+        TEST_ASSERT_EQ(backend_ptr->read_attempts(LedId::Disk1), 3U);
+
         reactor.stop();
         unlink(sock_path.c_str());
     });

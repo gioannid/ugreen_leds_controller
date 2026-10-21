@@ -34,6 +34,21 @@ void Scheduler::calibrate(LedId id, const LedState& state) {
     it->second.dirty = false;
 }
 
+void Scheduler::init_to_fallback(const std::map<LedId, LedState>& explicit_fallbacks) {
+    for (auto& [id, slot] : slots_) {
+        auto it = explicit_fallbacks.find(id);
+        if (it == explicit_fallbacks.end()) {
+            // No explicit [fallback] entry: the panel may legitimately show
+            // anything (e.g. firmware activity indicators), so this LED must
+            // not be rewritten — it is calibrated from hardware instead.
+            continue;
+        }
+        slot.desired = normalize_led_state(it->second);
+        slot.init_write = true;
+        slot.dirty = true;
+    }
+}
+
 uint64_t Scheduler::apply_patch(LedId id, const LedPatch& patch) {
     auto it = slots_.find(id);
     if (it == slots_.end()) return current_generation_;
@@ -92,7 +107,7 @@ uint64_t Scheduler::applied_generation(LedId id) const {
 
 bool Scheduler::has_dirty() const {
     for (const auto& [id, slot] : slots_) {
-        if (slot.dirty && slot.desired != slot.applied) {
+        if (slot.dirty && (slot.desired != slot.applied || slot.init_write)) {
             return true;
         }
     }
@@ -111,14 +126,26 @@ std::optional<HardwareBatch> Scheduler::generate_batch() {
     for (auto& [id, slot] : slots_) {
         if (!slot.dirty) continue;
 
-        if (slot.desired == slot.applied) {
+        if (slot.desired == slot.applied && !slot.init_write) {
             // Desired state equals applied state (e.g. temporary flash reverted)
             slot.dirty = false;
             slot.applied_generation = slot.desired_generation;
             continue;
         }
 
-        LedPatch diff = LedPatch::diff(slot.desired, slot.applied);
+        LedPatch diff;
+        if (slot.init_write) {
+            // Startup init-to-fallback: force a full-state write (every field)
+            // so the fallback reaches the hardware even when it matches the
+            // assumed initial state the scheduler started from.
+            diff.mode = slot.desired.mode;
+            diff.brightness = slot.desired.brightness;
+            diff.rgb = slot.desired.rgb;
+            diff.on_ms = slot.desired.on_ms;
+            diff.off_ms = slot.desired.off_ms;
+        } else {
+            diff = LedPatch::diff(slot.desired, slot.applied);
+        }
         if (!diff.empty()) {
             batch.operations.push_back(HardwareOperation{id, diff, slot.desired});
             max_gen = std::max(max_gen, slot.desired_generation);
@@ -147,6 +174,9 @@ void Scheduler::on_batch_complete(const HardwareBatchResult& result) {
         if (it != slots_.end()) {
             it->second.applied = state;
             it->second.last_hardware_error.clear();
+            // The forced startup write reached the hardware; a retry (after a
+            // failure on a *later* LED of this batch) is plain diff-based.
+            it->second.init_write = false;
             it->second.applied_generation = std::max(it->second.applied_generation, result.max_generation);
             if (it->second.desired == it->second.applied) {
                 it->second.dirty = false;
@@ -180,8 +210,15 @@ void Scheduler::evaluate_barriers() {
             // Only a current (non-stale) hardware error fails the barrier:
             // an error from a batch whose generation the desired state has
             // since surpassed is being retried, so the barrier must wait.
-            if (!slot.last_hardware_error.empty() &&
-                slot.desired_generation <= slot.error_generation) {
+            // A slot whose startup init write is still pending is a
+            // server-internal task, not a client update: its desired
+            // generation never advances on its own, so its staleness is
+            // measured against the global generation (client activity).
+            // Otherwise a startup write that failed once would keep failing
+            // every later FLUSH, even after the hardware has recovered and
+            // the client's own updates are what is actually pending.
+            uint64_t reference = slot.init_write ? current_generation_ : slot.desired_generation;
+            if (!slot.last_hardware_error.empty() && reference <= slot.error_generation) {
                 hardware_failed = true;
                 err_msg = slot.last_hardware_error;
             }

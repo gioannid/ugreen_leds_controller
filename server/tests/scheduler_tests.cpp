@@ -322,4 +322,122 @@ void run_scheduler_tests() {
         TEST_ASSERT(!barrier_success);
         TEST_ASSERT_EQ(barrier_err, "I2C bus timeout");
     });
+
+    test::run_test("Init-to-fallback forces a full-state write even when the fallback matches the assumed initial state", []() {
+        Scheduler sched({LedId::Disk1, LedId::Disk2});
+
+        // Default fallback (off, red, 200) equals the initial applied
+        // assumption — a plain diff would emit nothing, but the panel may
+        // physically show anything, so the write must still be forced.
+        std::map<LedId, LedState> fb;
+        fb[LedId::Disk1] = LedState{};
+        fb[LedId::Disk2] = LedState{};
+        sched.init_to_fallback(fb);
+        TEST_ASSERT(sched.has_dirty());
+
+        auto batch = sched.generate_batch();
+        TEST_ASSERT(batch.has_value());
+        TEST_ASSERT_EQ(batch->operations.size(), 2U);
+        for (const auto& op : batch->operations) {
+            TEST_ASSERT(op.patch.mode.has_value());
+            TEST_ASSERT(op.patch.brightness.has_value());
+            TEST_ASSERT(op.patch.rgb.has_value());
+            TEST_ASSERT(op.patch.on_ms.has_value());
+            TEST_ASSERT(op.patch.off_ms.has_value());
+            TEST_ASSERT_EQ(*op.patch.mode, OpMode::Off);
+        }
+
+        HardwareBatchResult res;
+        res.batch_id = batch->batch_id;
+        res.max_generation = batch->max_generation;
+        res.success = true;
+        for (const auto& op : batch->operations) {
+            res.applied_states.push_back({op.id, op.target_state});
+        }
+        sched.on_batch_complete(res);
+
+        TEST_ASSERT(!sched.has_dirty());
+        // The forced write is one-shot: nothing is re-written afterwards.
+        TEST_ASSERT(!sched.generate_batch().has_value());
+    });
+
+    test::run_test("Init-to-fallback writes a configured (non-default) fallback", []() {
+        Scheduler sched({LedId::Disk1});
+
+        LedState fb;
+        fb.mode = OpMode::Blink;
+        fb.rgb = RgbColor{0, 255, 0};
+        fb.brightness = 100;
+        fb.on_ms = 250;
+        fb.off_ms = 250;
+        sched.set_fallback(LedId::Disk1, fb);
+
+        sched.init_to_fallback({{LedId::Disk1, fb}});
+        TEST_ASSERT_EQ(sched.get_desired(LedId::Disk1).mode, OpMode::Blink);
+
+        auto batch = sched.generate_batch();
+        TEST_ASSERT(batch.has_value());
+        TEST_ASSERT_EQ(batch->operations.size(), 1U);
+        auto& op = batch->operations[0];
+        TEST_ASSERT_EQ(*op.patch.mode, OpMode::Blink);
+        TEST_ASSERT_EQ(*op.patch.on_ms, 250);
+        TEST_ASSERT_EQ(op.target_state.brightness, 100);
+
+        HardwareBatchResult res;
+        res.batch_id = batch->batch_id;
+        res.max_generation = batch->max_generation;
+        res.success = true;
+        res.applied_states.push_back({LedId::Disk1, op.target_state});
+        sched.on_batch_complete(res);
+
+        TEST_ASSERT(!sched.has_dirty());
+        TEST_ASSERT(sched.get_desired(LedId::Disk1) == sched.get_applied(LedId::Disk1));
+    });
+
+    test::run_test("Init-to-fallback write is retried as a full-state write after a hardware failure", []() {
+        Scheduler sched({LedId::Disk1});
+
+        sched.init_to_fallback({{LedId::Disk1, LedState{}}});
+        auto batch = sched.generate_batch();
+        TEST_ASSERT(batch.has_value());
+
+        // The hardware write fails: the LED must stay dirty and keep
+        // requesting a forced full-state write on the next batch.
+        HardwareBatchResult res;
+        res.batch_id = batch->batch_id;
+        res.max_generation = batch->max_generation;
+        res.success = false;
+        res.failed_led = LedId::Disk1;
+        res.error_message = "I2C bus timeout";
+        sched.on_batch_complete(res);
+
+        TEST_ASSERT(sched.has_dirty());
+        auto retry = sched.generate_batch();
+        TEST_ASSERT(retry.has_value());
+        TEST_ASSERT_EQ(retry->operations.size(), 1U);
+        // Full-state patch again, not an (empty) diff.
+        TEST_ASSERT(retry->operations[0].patch.mode.has_value());
+        TEST_ASSERT(retry->operations[0].patch.rgb.has_value());
+        TEST_ASSERT(retry->operations[0].patch.brightness.has_value());
+    });
+
+    test::run_test("Init-to-fallback leaves LEDs without an explicit fallback untouched", []() {
+        Scheduler sched({LedId::Disk1, LedId::Disk2});
+
+        // Only disk1 has an explicit [fallback] entry: it is the only LED
+        // rewritten at startup. disk2 is calibrated from the panel instead,
+        // so it must stay clean (no write, no state drift).
+        sched.init_to_fallback({{LedId::Disk1, LedState{}}});
+        TEST_ASSERT(sched.has_dirty());
+
+        auto batch = sched.generate_batch();
+        TEST_ASSERT(batch.has_value());
+        TEST_ASSERT_EQ(batch->operations.size(), 1U);
+        TEST_ASSERT_EQ(batch->operations[0].id, LedId::Disk1);
+
+        auto de = sched.get_desired(LedId::Disk2);
+        auto ap = sched.get_applied(LedId::Disk2);
+        TEST_ASSERT(de == ap);
+        TEST_ASSERT_EQ(ap.mode, OpMode::Off);
+    });
 }

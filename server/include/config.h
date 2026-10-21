@@ -61,6 +61,15 @@ struct ServerConfig {
     // LED backend: "i2c" (real hardware, default) or "fake" (in-memory simulator).
     std::string backend = "i2c";
 
+    // Write the configured [fallback] state to every LED with an explicit
+    // [fallback] entry at startup (default) so a fresh start never shows
+    // stale firmware state. LEDs without an explicit entry are never written
+    // at startup — the server only calibrates them (reads the panel and
+    // adopts the current hardware state as the baseline). With no [fallback]
+    // entries at all, the startup is purely read-only; disabling the switch
+    // forces the read-only calibration for every LED.
+    bool init_to_fallback = true;
+
     ServerConfig() = default;
     // Allows constructing a transport-only config (development default:
     // empty access policy is replaced by a permissive local-only policy).
