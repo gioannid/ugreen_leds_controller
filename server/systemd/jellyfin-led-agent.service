@@ -1,0 +1,56 @@
+[Unit]
+Description=Jellyfin LED agent for UGREEN NAS (disk3 status indicator)
+# Start after network is up so the TCP connection to ugreen_leds_server
+# can be established.  The agent reconnects automatically if the server
+# is not yet reachable, so a soft ordering dependency is enough.
+After=network-online.target
+Wants=network-online.target
+# If Jellyfin itself runs as a local service in this LXC, you can
+# uncomment the next line to ensure the LED agent starts after it:
+# After=jellyfin.service
+
+[Service]
+Type=simple
+
+# --- Deployment: copy jellyfin_lxc.py to /usr/local/bin/ and chmod +x ---
+ExecStart=/usr/bin/python3 /usr/local/bin/jellyfin_lxc.py \
+    --led-host 192.168.178.250 \
+    --led-port 39001 \
+    --led-name disk3 \
+    --webhook-port 9090
+
+# Override any of the above with environment variables instead:
+# EnvironmentFile=/etc/jellyfin-led-agent.env
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Logging goes to the journal by default.
+# Add --verbose to ExecStart for debug-level output.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jellyfin-led-agent
+
+# Run as a dedicated low-privilege user.
+# Create it with: adduser --system --no-create-home jellyfin-led
+User=cli
+Group=users
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+# Allow outbound TCP (LED server) and listening on the webhook port
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
