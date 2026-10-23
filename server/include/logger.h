@@ -54,11 +54,15 @@ public:
 private:
     Logger() = default;
 
+    // Caller must hold mutex_.
+    bool ensure_file_locked(std::string& error);
+    
     mutable std::mutex mutex_;
     bool initialized_ = false;
     LogLevel min_level_ = LogLevel::Info;
     bool to_screen_ = true;
     std::FILE* file_ = nullptr;
+    std::string file_path_;
 };
 
 namespace log {

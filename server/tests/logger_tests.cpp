@@ -125,6 +125,31 @@ void run_logger_tests() {
         TEST_ASSERT(!logger.initialized());
     });
 
+    test::run_test("Deleted log file is recreated while running", []() {
+        const std::string path =
+            "/tmp/logger_test_deleted_" +
+            std::to_string(getpid()) + ".log";
+        std::remove(path.c_str());
+
+        auto& logger = Logger::instance();
+        std::string err;
+        TEST_ASSERT(logger.init(LogConfig{path, false}, err));
+
+        log::info("before deletion");
+        TEST_ASSERT(std::remove(path.c_str()) == 0);
+
+        log::info("after deletion");
+        logger.shutdown();
+
+        const std::string content = read_file(path);
+        TEST_ASSERT(
+            content.find("[INFO] after deletion") != std::string::npos);
+        TEST_ASSERT(
+            content.find("before deletion") == std::string::npos);
+
+        std::remove(path.c_str());
+    });
+    
     test::run_test("Level ordering maps to distinct tags", []() {
         TEST_ASSERT_EQ(std::string(to_string(LogLevel::Debug)), std::string("DEBUG"));
         TEST_ASSERT_EQ(std::string(to_string(LogLevel::Info)), std::string("INFO"));

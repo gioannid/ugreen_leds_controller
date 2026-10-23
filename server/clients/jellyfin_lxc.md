@@ -49,7 +49,7 @@ sudo cp jellyfin_lxc.py /usr/local/bin/jellyfin_lxc.py
 sudo chmod +x /usr/local/bin/jellyfin_lxc.py
 
 # Create a dedicated unprivileged user
-sudo adduser --system --no-create-home jellyfin-led
+sudo adduser --system --no-create-home cli
 ```
 
 ### 2.2 Install the systemd service
