@@ -4,6 +4,7 @@
 
 | Signal | Source | LED state |
 |---|---|---|
+| VM **pending Windows updates** (download/install/reboot) | Windows 11 VM (`[access.win]`) | `$LedName` **solid orange** |
 | VM booted, **no user logged in** | Windows 11 VM (`[access.win]`) | `$LedName` **solid red** |
 | VM **≥1 user logged in** | Windows 11 VM (`[access.win]`) | `$LedName` **solid green** |
 | VM **powered off / TCP connection dropped** | Server fallback on disconnect | `$LedName` **off** |
@@ -58,8 +59,9 @@ Register-ScheduledTask -TaskName 'UgreenLedAgent' -Action $action -Trigger $trig
 
 > [!IMPORTANT]
 > The task must start **before user logon** (trigger = at startup, user = SYSTEM).
-> `query session` works from SYSTEM context and sees all sessions including the
-> locked/login-screen state.
+> `quser` works from SYSTEM context and sees all sessions including the locked/login-screen
+> state. Running as SYSTEM also permits querying the Windows Update COM API
+> (`Microsoft.Update.Session`) and pending reboot registry keys without requiring interactive user elevation.
 
 ---
 
@@ -68,12 +70,13 @@ Register-ScheduledTask -TaskName 'UgreenLedAgent' -Action $action -Trigger $trig
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ Scenario                  │ $LedName owner    │ $LedName state        │
-│───────────────────────────│────────────────│────────────────────│
-│ VM running, user logged in│ Windows agent  │ solid GREEN        │
-│ VM running, at login scrn │ Windows agent  │ solid RED          │
-│ VM shuts down / crashes   │ — (fallback)   │ OFF  ← automatic   │
-│ VM reboots (briefly down) │ — (fallback)   │ OFF  ← automatic   │
-│ Windows agent PS error    │ — (fallback)   │ OFF  ← automatic   │
+│───────────────────────────│───────────────────│───────────────────────│
+│ VM running, updates pend. │ Windows agent     │ solid ORANGE          │
+│ VM running, user logged in│ Windows agent     │ solid GREEN           │
+│ VM running, at login scrn │ Windows agent     │ solid RED             │
+│ VM shuts down / crashes   │ — (fallback)      │ OFF  ← automatic      │
+│ VM reboots (briefly down) │ — (fallback)      │ OFF  ← automatic      │
+│ Windows agent PS error    │ — (fallback)      │ OFF  ← automatic      │
 └────────────────────────────────────────────────────────────────┘
 ```
 

@@ -34,8 +34,8 @@ SyslogIdentifier=jellyfin-led-agent
 
 # Run as a dedicated low-privilege user.
 # Create it with: adduser --system --no-create-home jellyfin-led
-User=cli
-Group=users
+User=jellyfin-led
+Group=jellyfin-led
 
 # Hardening
 NoNewPrivileges=true

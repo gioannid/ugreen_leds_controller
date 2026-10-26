@@ -1,27 +1,60 @@
 # vm_windows.ps1
-# Monitors local login sessions and drives a configurable LED on the NAS LED server.
-# (red for no users logged on, green for logged on users)
+# Monitors local login sessions and Windows Update status, driving a configurable
+# LED on the NAS LED server.
+# (orange for pending updates, green for logged on users, red for no users logged on)
 # Runs persistently; reconnects automatically on drop.
 #
 # Requirements: PowerShell 5.1+, no extra modules.
 
 param(
-    [string]$NasAddress   = '192.168.178.250',   # NAS LAN IP (where ugreen_leds_server listens)
-    [int]   $NasPort      = 39001,
-    [string]$LedName      = 'disk4',             # LED name to control on the NAS
-    [int]   $PollSeconds  = 3,                   # how often to re-check login state
-    [int]   $BackoffMaxMs = 30000                # max reconnect delay (30 s)
+    [string]$NasAddress        = '192.168.178.250',   # NAS LAN IP (where ugreen_leds_server listens)
+    [int]   $NasPort           = 39001,
+    [string]$LedName           = 'disk4',             # LED name to control on the NAS
+    [int]   $PollSeconds       = 3,                   # how often to re-check login state
+    [int]   $UpdatePollSeconds = 30,                  # how often to re-check Windows update state
+    [int]   $BackoffMaxMs      = 30000                # max reconnect delay (30 s)
 )
-
-#function Get-ActiveUserCount {
-#    # query=(0) means query all sessions; State 'Active' = logged-in interactive session
-#    $sessions = query session 2>$null
-#    $active = $sessions | Where-Object { $_ -match 'Active' }
-#    return @($active).Count
-#}
 
 function Get-ActiveUserCount {
     return @(quser 2>$null | Select-Object -Skip 1).Count
+}
+
+function Get-PendingUpdateCount {
+    $count = 0
+    $session = $null
+    $searcher = $null
+    try {
+        $session = New-Object -ComObject Microsoft.Update.Session
+        $searcher = $session.CreateUpdateSearcher()
+        try { $searcher.Online = $false } catch {}
+        $searchResult = $searcher.Search("IsHidden=0 and IsInstalled=0")
+        $count = $searchResult.Updates.Count
+    }
+    catch {
+        # COM or service unavailable (e.g. wuauserv stopped)
+    }
+    finally {
+        if ($null -ne $searcher) {
+            try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($searcher) | Out-Null } catch {}
+        }
+        if ($null -ne $session) {
+            try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($session) | Out-Null } catch {}
+        }
+    }
+
+    if ($count -eq 0) {
+        try {
+            $wuReboot  = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+            $cbsReboot = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+            $usoReboot = Test-Path "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\Orchestrator\RebootRequired"
+            if ($wuReboot -or $cbsReboot -or $usoReboot) {
+                $count = 1
+            }
+        }
+        catch {}
+    }
+
+    return $count
 }
 
 function Send-Line([IO.StreamWriter]$w, [string]$line) {
@@ -54,12 +87,32 @@ while ($true) {
         $backoff = 1000  # reset on successful connect
 
         $lastColor = $null
+        $lastUpdateCheck = [DateTime]::MinValue
+        $cachedUpdateCount = 0
 
         while ($tcp.Connected) {
-            $userCount = Get-ActiveUserCount
+            $now = [DateTime]::UtcNow
+            if (($now - $lastUpdateCheck).TotalSeconds -ge $UpdatePollSeconds) {
+                $cachedUpdateCount = Get-PendingUpdateCount
+                $lastUpdateCheck = $now
+            }
 
-            $color = if ($userCount -gt 0) { '0,255,0' } else { '255,0,0' }
-            $desc  = if ($userCount -gt 0) { "green ($userCount user(s) logged in)" } else { 'red (no user logged in)' }
+            $userCount   = Get-ActiveUserCount
+            $updateCount = $cachedUpdateCount
+
+            if ($updateCount -gt 0) {
+                $color = '255,128,0'
+                $userDesc = if ($userCount -gt 0) { "$userCount user(s) logged in" } else { 'no user logged in' }
+                $desc  = "orange ($updateCount update(s) pending, $userDesc)"
+            }
+            elseif ($userCount -gt 0) {
+                $color = '0,255,0'
+                $desc  = "green ($userCount user(s) logged in)"
+            }
+            else {
+                $color = '255,0,0'
+                $desc  = 'red (no user logged in)'
+            }
 
             if ($color -ne $lastColor) {
                 Write-Host "[$(Get-Date -f 'HH:mm:ss')] $LedName -> $desc"

@@ -1,0 +1,40 @@
+[Unit]
+Description=qBittorrent LXC LED agent for UGREEN NAS (disk1)
+Wants=network-online.target
+After=network-online.target
+# Keep running when qBittorrent stops, so API unavailability is shown in red.
+
+[Service]
+Type=simple
+User=qbittorrent-led
+Group=qbittorrent-led
+Environment=PYTHONUNBUFFERED=1
+Environment=LED_HOST=192.168.178.250
+Environment=LED_PORT=39001
+Environment=LED_NAME=disk1
+Environment=QB_URL=http://127.0.0.1:8080
+EnvironmentFile=-/etc/qbittorrent-led-agent.env
+ExecStart=/usr/bin/python3 /usr/local/bin/qbittorrent_lxc.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=25
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qbittorrent-led-agent
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
