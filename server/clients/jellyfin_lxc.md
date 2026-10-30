@@ -5,7 +5,7 @@
 | Signal | Source | `disk3` state |
 |---|---|---|
 | LXC booted, Jellyfin **not yet confirmed** | Agent startup | **solid red** |
-| Jellyfin **running** (first webhook received) | Jellyfin Webhook plugin | **solid green** |
+| Jellyfin **running** (health-poll success **or** first webhook) | Health-poll thread / Jellyfin Webhook plugin | **solid green** |
 | **Playback active** (≥1 session) | Jellyfin Webhook plugin | **blinking green** |
 | **All playback stopped** | Jellyfin Webhook plugin | **solid green** |
 | Agent **stops / crashes** | Server fallback on disconnect | **off** (configured via `[fallback]`) |
@@ -13,6 +13,12 @@
 The agent (`jellyfin_lxc.py`) runs **inside the Jellyfin LXC** and connects out
 to `ugreen_leds_server` over TCP.  It simultaneously acts as an HTTP server for
 the Jellyfin Webhook plugin so it can react to playback events in real time.
+
+A **health-poll background thread** periodically probes Jellyfin's `/health`
+endpoint (falling back to `/System/Info/Public`) so that the `BOOTING → IDLE`
+transition happens automatically even when:
+- the agent was restarted while Jellyfin was already running, or
+- the Jellyfin Webhook plugin is not configured.
 
 ---
 
@@ -132,6 +138,8 @@ All parameters can be set via CLI flags **or** environment variables:
 | `--led-name` | `LED_NAME` | `disk3` | LED identifier |
 | `--webhook-host` | `WEBHOOK_HOST` | `0.0.0.0` | Webhook listener bind address |
 | `--webhook-port` | `WEBHOOK_PORT` | `9090` | Webhook listener port |
+| `--jellyfin-url` | `JELLYFIN_URL` | `http://localhost:8096` | Jellyfin base URL for health-poll |
+| `--health-poll-interval` | — | `10` | Seconds between health-poll probes (BOOTING state only) |
 | `--blink-on-ms` | — | `500` | Playback blink on-time (ms) |
 | `--blink-off-ms` | — | `500` | Playback blink off-time (ms) |
 | `--brightness` | — | `200` | LED brightness (1–255) |

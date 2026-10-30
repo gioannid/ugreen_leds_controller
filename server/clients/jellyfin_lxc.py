@@ -7,7 +7,8 @@ Behaviour
   • On start (LXC up, Jellyfin not yet confirmed running):
         disk3  →  solid RED
 
-  • Once Jellyfin is detected up (first webhook received, or health-poll):
+  • Once Jellyfin is detected up (first webhook received **or** health-poll
+    success — whichever comes first):
         disk3  →  solid GREEN
 
   • While at least one Jellyfin playback session is active:
@@ -18,6 +19,14 @@ Behaviour
 
   • On disconnect from LED server: reconnects with exponential back-off
     and re-asserts the current logical state.
+
+Health-poll
+-----------
+  A background thread periodically polls Jellyfin's /health endpoint
+  (falling back to /System/Info/Public) until it gets a response.  This
+  is the primary mechanism for detecting Jellyfin after a restart of the
+  agent when Jellyfin is already running — webhooks alone cannot signal
+  this because Jellyfin only sends them on playback events.
 
 Webhook
 -------
@@ -37,11 +46,13 @@ Webhook
   Unknown events are silently ignored (they still confirm Jellyfin is up).
 
 Configuration (environment variables or command-line args — see --help):
-  LED_HOST        NAS host running ugreen_leds_server (default: 192.168.178.250)
-  LED_PORT        TCP port                            (default: 39001)
-  LED_NAME        LED to control                      (default: disk3)
-  WEBHOOK_HOST    Webhook listener bind address       (default: 0.0.0.0)
-  WEBHOOK_PORT    Webhook listener port               (default: 9090)
+  LED_HOST              NAS host running ugreen_leds_server (default: 192.168.178.250)
+  LED_PORT              TCP port                            (default: 39001)
+  LED_NAME              LED to control                      (default: disk3)
+  WEBHOOK_HOST          Webhook listener bind address       (default: 0.0.0.0)
+  WEBHOOK_PORT          Webhook listener port               (default: 9090)
+  JELLYFIN_URL          Jellyfin base URL for health-poll   (default: http://localhost:8096)
+  --health-poll-interval  Seconds between health-poll probes (default: 10)
 
 Requirements: Python 3.8+, no third-party packages.
 """
@@ -54,6 +65,8 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
 
@@ -85,6 +98,10 @@ def parse_args() -> argparse.Namespace:
                    help="Bind address for the Jellyfin webhook listener")
     p.add_argument("--webhook-port", default=int(os.environ.get("WEBHOOK_PORT", "9090")), type=int,
                    help="Port for the Jellyfin webhook listener")
+    p.add_argument("--jellyfin-url", default=os.environ.get("JELLYFIN_URL", "http://localhost:8096"),
+                   help="Jellyfin base URL for health-polling (used only until first confirmed-up)")
+    p.add_argument("--health-poll-interval", default=10, type=int,
+                   help="Seconds between Jellyfin health-poll attempts while in BOOTING state")
     p.add_argument("--blink-on-ms",  default=500, type=int,
                    help="Blink on-time in ms during playback")
     p.add_argument("--blink-off-ms", default=500, type=int,
@@ -201,6 +218,7 @@ class LedAgent:
             log.info("Connecting to LED server %s:%d ...", self._host, self._port)
             sock = socket.create_connection((self._host, self._port), timeout=10)
             sock.settimeout(None)          # blocking for readline
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             self._sock  = sock
             self._file  = sock.makefile("r", encoding="ascii")
             self._req_id = 1
@@ -307,6 +325,9 @@ class LedAgent:
     def run(self) -> None:
         backoff = 1.0
         last_pushed: Optional[str] = None
+        # Periodic re-push interval (s) — exercises the socket even when state
+        # is unchanged so dead TCP connections are detected promptly.
+        _HEARTBEAT_INTERVAL = 60.0
 
         while True:
             # Connect (with back-off)
@@ -325,10 +346,11 @@ class LedAgent:
 
             with self._lock:
                 last_pushed = self._state
+            last_heartbeat = time.monotonic()
 
             # Wait for state changes and keep pushing them
             while self._connected:
-                # Wait up to 5 s for a change signal, then heartbeat-check
+                # Wait up to 5 s for a change signal
                 changed = self._want_push.wait(timeout=5.0)
                 if changed:
                     self._want_push.clear()
@@ -336,11 +358,16 @@ class LedAgent:
                 with self._lock:
                     current = self._state
 
-                if current != last_pushed:
+                now = time.monotonic()
+                state_changed = current != last_pushed
+                heartbeat_due = (now - last_heartbeat) >= _HEARTBEAT_INTERVAL
+
+                if state_changed or heartbeat_due:
                     if not self._push_state():
                         self._disconnect()
                         break
                     last_pushed = current
+                    last_heartbeat = now
 
             # Socket died — reconnect after brief pause
             if not self._connected:
@@ -434,8 +461,58 @@ def _make_webhook_handler(agent: LedAgent):
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Jellyfin health-poll (background thread)
 # ---------------------------------------------------------------------------
+
+def _jellyfin_health_poll(agent: LedAgent, cfg: argparse.Namespace) -> None:
+    """
+    Periodically polls the Jellyfin HTTP health endpoint until Jellyfin
+    responds with a 2xx status.  Once confirmed alive, calls
+    ``agent.notify_jellyfin_up()`` and exits — the agent will stay in
+    IDLE/PLAYING from that point on and webhooks take over.
+
+    This covers the common scenario where Jellyfin was already running
+    when the agent (re)started, so no initial webhook is ever fired.
+    """
+    base = cfg.jellyfin_url.rstrip("/")
+    interval = cfg.health_poll_interval
+
+    # Try the modern /health endpoint first; fall back to the public info
+    # endpoint which has been present since Jellyfin 10.x.
+    endpoints = [f"{base}/health", f"{base}/System/Info/Public"]
+
+    log.info("Health-poll: will probe Jellyfin at %s every %ds until it responds",
+             base, interval)
+
+    while True:
+        # Once we leave BOOTING the poll thread is no longer needed.
+        with agent._lock:  # noqa: SLF001  (intentional internal access)
+            if agent._state != LedState.BOOTING:  # noqa: SLF001
+                log.debug("Health-poll: Jellyfin already confirmed up — exiting poll thread")
+                return
+
+        for url in endpoints:
+            try:
+                with urllib.request.urlopen(url, timeout=5) as resp:
+                    if resp.status < 300:
+                        log.info("Health-poll: Jellyfin responded on %s (HTTP %d) — marking up",
+                                 url, resp.status)
+                        agent.notify_jellyfin_up()
+                        return
+            except urllib.error.HTTPError as exc:
+                # Any HTTP error (e.g. 401 Unauthorized) still means the
+                # server is alive and listening.
+                log.info("Health-poll: Jellyfin responded on %s (HTTP %d) — marking up",
+                         url, exc.code)
+                agent.notify_jellyfin_up()
+                return
+            except (urllib.error.URLError, OSError) as exc:
+                log.debug("Health-poll: %s unreachable (%s)", url, exc)
+
+        time.sleep(interval)
+
+
+
 def main() -> None:
     cfg = parse_args()
     if cfg.verbose:
@@ -445,12 +522,20 @@ def main() -> None:
     log.info("  LED server : %s:%d", cfg.led_host, cfg.led_port)
     log.info("  LED name   : %s", cfg.led_name)
     log.info("  Webhook    : %s:%d", cfg.webhook_host, cfg.webhook_port)
+    log.info("  Jellyfin   : %s (health-poll every %ds)", cfg.jellyfin_url, cfg.health_poll_interval)
 
     agent = LedAgent(cfg.led_host, cfg.led_port, cfg.led_name, cfg)
 
     # LED agent runs in a background daemon thread
     agent_thread = threading.Thread(target=agent.run, name="led-agent", daemon=True)
     agent_thread.start()
+
+    # Health-poll thread: detects Jellyfin coming up independently of webhooks
+    poll_thread = threading.Thread(
+        target=_jellyfin_health_poll, args=(agent, cfg),
+        name="jellyfin-health-poll", daemon=True,
+    )
+    poll_thread.start()
 
     # Webhook server runs in the main thread
     handler_cls = _make_webhook_handler(agent)
