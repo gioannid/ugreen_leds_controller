@@ -1,0 +1,43 @@
+{
+  "image": "power-netdev-disk1-disk2-disk3-disk4.jpg",
+  "image_width": 2072,
+  "image_height": 2019,
+  "leds": {
+    "power": {
+      "x": 298,
+      "y": 1808,
+      "radius": 26,
+      "label": "Power"
+    },
+    "netdev": {
+      "x": 530,
+      "y": 1808,
+      "radius": 22,
+      "label": "LAN"
+    },
+    "disk1": {
+      "x": 606,
+      "y": 1808,
+      "radius": 22,
+      "label": "Disk1"
+    },
+    "disk2": {
+      "x": 684,
+      "y": 1808,
+      "radius": 22,
+      "label": "Disk2"
+    },
+    "disk3": {
+      "x": 762,
+      "y": 1808,
+      "radius": 22,
+      "label": "Disk3"
+    },
+    "disk4": {
+      "x": 842,
+      "y": 1808,
+      "radius": 22,
+      "label": "Disk4"
+    }
+  }
+}

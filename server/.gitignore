@@ -3,3 +3,4 @@ test_runner
 example_client
 hw_smoke_test
 hw_monkey_test
+http_status_server

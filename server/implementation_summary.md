@@ -1,11 +1,11 @@
-# UGREEN LED Server — Stages 1–4 Implementation
+# UGREEN LED Server — Stages 1–5 Implementation
 
 ## Build & Test
 
 ```bash
 cd server/
-make clean && make     # Builds ugreen_leds_server, test_runner, example_client, hw_smoke_test, hw_monkey_test
-make test              # Runs the full test suite (100 tests, all pass)
+make clean && make     # Builds ugreen_leds_server, test_runner, example_client, hw_smoke_test, hw_monkey_test, http_status_server
+make test              # Runs the full test suite (138 tests, all pass)
 ```
 
 `hw_smoke_test` and `hw_monkey_test` are separate, statically linked binaries
@@ -134,7 +134,31 @@ no transition was ever verified as a whole. The hardening:
 - `backend` config key: parsing, rejection of unknown backends, defaults.
 - Device-discovery sanity and an environment-aware construction test: on a host without the UGREEN chip the backend must fail cleanly; on the production host it must come up, report LEDs, and reject non-present ones. The same test suite therefore passes on both machines.
 
-### Test Suite (100 tests)
+### Stage 5: HTTP Status Server
+
+| File | Purpose |
+|---|---|
+| [`include/http_status.h`](include/http_status.h) / [`src/http_status.cpp`](src/http_status.cpp) | All status-page logic, free of process-global state and unit-testable: LED-server protocol parsing (`parse_get_response`, `parse_caps_leds`), a small recursive-descent JSON parser for layout files, asset discovery, HTML rendering, request routing, the socket server class, and the persistent LED-server client (`LedStatusClient`: one connection, reconnect + capped backoff on failure) |
+| [`src/http_status_server.cpp`](src/http_status_server.cpp) | Thin `main()`: CLI parsing (`--led-socket`/`--led-host`/`--led-port`/`--led-timeout`/`--assets-dir`/`--bind`/`--port`), SIGINT/SIGTERM shutdown, SIGPIPE ignored |
+| [`assets/`](assets/) | Example layout: `power-netdev-disk1-disk2-disk3-disk4.json` (NAS panel photo + per-LED `x`/`y`/`radius`/`label`) plus the `power-netdev-disk1-disk2-disk3-disk4.jpg` photo it references |
+| [`tests/http_status_tests.cpp`](tests/http_status_tests.cpp) | 37 unit + end-to-end tests (see test table) |
+
+**Behavior** (`http_status_server --led-socket /tmp/ugreen_leds.sock --assets-dir assets --port 8080`):
+
+- **Read-only viewer**: the server keeps **one persistent connection** to the running LED server (PROTOCOL.md §10.7 — one connection per agent, not one per command). It sends `HELLO` + `CAPS` once at (re)connect time, then only `GET led=<name> source=applied` per page. If a query fails because the connection died (LED server restarted, reset, or a malformed line) the next page reconnects and retries once immediately; if the LED server cannot be reached at all, retries are paced with a capped exponential backoff (1 s → 30 s) that resets on success, so a stopped server is not probed on every 5 s page refresh. It issues no mutating command, so it needs only the `GET`/`CAPS` verbs from the access config (a local read-only rule suffices).
+- **`GET /`** — HTML page that auto-refreshes every 5 s. If the assets directory contains a layout matching the current LED set, the page shows the NAS photo with the live state overlaid as SVG circles (mode-dependent: `blink`/`breath` animate, colors/brightness from the applied state); LEDs in the layout but absent from the server are drawn dim (`led-missing`), and LEDs the server reports but the layout lacks are table-only. A readable table (LED, label, mode, color swatch, brightness, cycle) is always rendered below the image — it stands alone when no layout matches. When the LED server is unreachable or times out, a proper 503 page is served instead.
+- **Layout discovery** — exact filename `<led1>-<led2>-...-<ledN>.json` (CAPS order) wins; otherwise any `*.json` whose name mentions every LED is a candidate and the shortest (most specific) filename wins. Unparseable candidates are skipped.
+- **`GET /assets/<file>`** — static files from `--assets-dir` with extension-based MIME types; path traversal (`../`), subpath escapes, and missing files are rejected (403/404). Unknown paths are 404.
+- **Timeouts** — the LED-server client has an I/O timeout (`--led-timeout`, default 2000 ms; `SO_RCVTIMEO`/`SO_SNDTIMEO`) and a 5 s connect/socket timeout, so a hung LED server or a stalled client can never block the (single-threaded) HTTP server; worst case the page degrades to the 503 view after the timeout.
+- **Parsing is strict** — `ERR` lines, unparseable values, `status=invalid`, and a mismatched `led=` field all mark the LED as "not ok" (shown as unavailable in the table/overlay); unknown extra fields are tolerated so future protocol versions don't break the viewer. `parse_get_response` reuses `parse_op_mode`/`parse_rgb` from `led_state.cpp`, so mode/RGB acceptance rules stay single-sourced.
+- **Standalone** — links only `http_status.o` + `led_state.o`; it is a separate binary that runs next to (not inside) `ugreen_leds_server`, so the service binary and the LED hardware path are untouched.
+
+**Test notes** (in addition to the general ones below):
+
+- The e2e tests run a real HTTP listener (`http_port = 0` → ephemeral port) against a `FakeLedServer` that speaks the real line protocol (HELLO/CAPS/GET) on a Unix socket or loopback TCP, and verify the served bytes with a raw TCP client. One fake runs in "hang" mode to prove the `--led-timeout` path ends in a 503 instead of blocking forever.
+- The JSON parser is a dedicated recursive-descent implementation (the repo has no other JSON dependency); tests cover key reordering, compact formatting, `\uXXXX` escapes, the default `radius` of 16, and a battery of malformed files.
+
+### Test Suite (138 tests)
 
 | Test File | Tests |
 |---|---|
@@ -148,6 +172,7 @@ no transition was ever verified as a whole. The hardening:
 | [`tests/access_tests.cpp`](tests/access_tests.cpp) | No-match denial, LED restriction, verb restriction, priority ceiling + stronger-rule preemption, per-rule connection limit + release, server-wide connection limit, command rate limit with refill, hardware-read rate limit, slow-client backpressure disconnect |
 | [`tests/stress_tests.cpp`](tests/stress_tests.cpp) | 1000-connection churn with `VmRSS` growth check (< 32 MB), 6-thread sustained parallel load, hardware failure storm (100 failing FLUSH rounds then recovery) |
 | [`tests/i2c_backend_tests.cpp`](tests/i2c_backend_tests.cpp) | Stage 4 without hardware: `plan_led_update()` command planning, controller-op descriptions, device discovery sanity, environment-aware backend construction, `backend` config parsing and rejection cases |
+| [`tests/http_status_tests.cpp`](tests/http_status_tests.cpp) | Stage 5: protocol response parsing (full/malformed GET lines, ERR, `status=invalid`, out-of-range rgb, mismatched `led=`, unknown fields; CAPS name extraction), layout JSON parsing (valid file, key order/whitespace/escapes, default radius, malformed files), asset discovery (exact-name win, substring fallback, unparseable skip, no candidate, missing dir), URL path/MIME/wire-format helpers, HTML rendering (overlay + table, no-asset, unavailable LED), request routing (index with injected query, empty query → 503, asset serving, traversal/subpath rejection, 404), the persistent LED client (one connection across queries; unreachable server backed off, not hammered), and 7 e2e tests over a real listener against a fake LED server (Unix, TCP, unreachable → 503, hanging server → timeout, one handshake for many pages, reconnect + recovery after the LED server restarts, backoff pacing while the server is hung) |
 
 ## Architecture Alignment
 
@@ -182,6 +207,13 @@ The implementation follows the ARCHITECTURE.md design:
 - **Fail-fast with diagnostics**: missing adapter, missing device node, and chip-not-present all produce a distinct `HardwareException` message (with the `errno` text) that is logged at startup.
 - **Ownership of I/O**: all controller reads/writes happen on the hardware worker thread; `capabilities()` returns the constructor-time probe cache, so the reactor can serve CAPS without touching the bus.
 - **Verification semantics**: a batch is "applied" only when every command was acknowledged by the chip's result register; otherwise the existing error_generation/retry machinery applies.
+
+### Stage 5 behavior
+
+- **One persistent connection, read-only** (PROTOCOL.md §10.7): the viewer keeps a single connection to the LED server for its whole lifetime — `HELLO`/`CAPS` run once per (re)connect, not per page, so the LED server log no longer gets a handshake per refresh. The connection is only dropped on failure: a mid-query failure (server restart, reset, unparseable line) triggers an immediate retry on a fresh connection, while an unreachable server paces retries with a capped exponential backoff (1 s, 2 s, 4 s, …, max 30 s, reset on success). It only ever sends `GET source=applied`, so a minimal read-only access rule is all it needs; `HttpStatusServer::stop()` releases the connection.
+- **Degradation instead of failure**: unreachable LED server, query timeout, or malformed responses never crash or hang the viewer — they degrade to the 503 page (unreachable) or an "unavailable" row per LED (bad line). The 2 s I/O timeout per query bounds the worst case for the single-threaded accept loop.
+- **Layout matching is name-based, order-insensitive except for the exact name**: an exact `<led1>-<led2>-...-<ledN>.json` (CAPS order) is the primary match; the substring fallback lets one photo cover several configurations (e.g. a superset layout) and the shortest filename wins, so a layout for a 4-LED configuration is preferred over the same photo named for 6 LEDs.
+- **The photo is an asset, not a dependency**: without `--assets-dir` (or with no matching layout) the page is still fully useful — the table is the primary view and the overlay is an enhancement.
 
 ### Test notes
 

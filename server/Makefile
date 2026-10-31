@@ -28,7 +28,8 @@ LIB_OBJS = src/led_state.o \
            src/hardware_worker.o \
            src/reactor.o \
            src/logger.o \
-           src/i2c_led_backend.o
+           src/i2c_led_backend.o \
+           src/http_status.o
 
 TEST_SRCS = tests/test_main.cpp \
             tests/protocol_tests.cpp \
@@ -40,7 +41,8 @@ TEST_SRCS = tests/test_main.cpp \
             tests/integration_tests.cpp \
             tests/access_tests.cpp \
             tests/stress_tests.cpp \
-            tests/i2c_backend_tests.cpp
+            tests/i2c_backend_tests.cpp \
+            tests/http_status_tests.cpp
 
 TEST_OBJS = $(TEST_SRCS:.cpp=.o)
 
@@ -59,7 +61,7 @@ HW_TEST_OBJS = $(HW_TEST_SRCS:.cpp=.o)
 HW_MONKEY_TEST_SRC = tests/hw/hardware_monkey_test.cpp
 HW_MONKEY_TEST_OBJ = $(HW_MONKEY_TEST_SRC:.cpp=.o)
 
-all: ugreen_leds_server test_runner example_client hw_smoke_test hw_monkey_test
+all: ugreen_leds_server test_runner example_client hw_smoke_test hw_monkey_test http_status_server
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
@@ -85,14 +87,18 @@ hw_smoke_test: $(HW_TEST_OBJS) $(LIB_OBJS) $(COMMON_OBJS)
 hw_monkey_test: $(HW_MONKEY_TEST_OBJ)
 	$(CXX) $(CXXFLAGS) -static -o $@ $^
 
+# Lightweight HTTP status server: standalone, no server internals required.
+http_status_server: src/http_status_server.o src/http_status.o src/led_state.o
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
 test: test_runner
 	./test_runner
 
-ALL_OBJS = $(SERVER_OBJS) $(COMMON_OBJS) $(TEST_OBJS) $(HW_TEST_OBJS) $(HW_MONKEY_TEST_OBJ) examples/client.o
+ALL_OBJS = $(SERVER_OBJS) $(COMMON_OBJS) $(TEST_OBJS) $(HW_TEST_OBJS) $(HW_MONKEY_TEST_OBJ) examples/client.o src/http_status_server.o src/http_status.o
 
 -include $(ALL_OBJS:.o=.d)
 
 clean:
-	rm -f src/*.o tests/*.o tests/hw/*.o examples/*.o $(COMMON_OBJS) src/*.d tests/*.d tests/hw/*.d examples/*.d *.d ugreen_leds_server test_runner example_client hw_smoke_test hw_monkey_test
+	rm -f src/*.o tests/*.o tests/hw/*.o examples/*.o $(COMMON_OBJS) src/*.d tests/*.d tests/hw/*.d examples/*.d *.d ugreen_leds_server test_runner example_client hw_smoke_test hw_monkey_test http_status_server
 
 .PHONY: all test clean
