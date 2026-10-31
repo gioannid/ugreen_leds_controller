@@ -1,0 +1,32 @@
+[Unit]
+Description=OpenMediaVault VM UGREEN netdev LED agent
+Wants=network-online.target
+After=network-online.target openmediavault-engined.service
+
+[Service]
+Type=simple
+User=root
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/default/omv-led-agent
+ExecStart=/usr/bin/python3 /usr/local/bin/omv_vm.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=omv-led-agent
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Do not use PrivateTmp: OMV uses host-visible /tmp status and IPC files.
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
