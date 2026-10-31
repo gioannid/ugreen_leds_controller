@@ -86,3 +86,29 @@ applies `[fallback] $LedName=mode=off` — no polling, no delay, no PVE involvem
 
 When the VM boots again and the Windows agent reconnects and sends its first
 `SET`, it re-acquires ownership and the colour reappears.
+
+---
+
+## 4. Agent reconnection (drop / LED server restart)
+
+The agent never gives up: every failure path (connect refused, connect
+timeout, HELLO rejected, EOF mid-command, response timeout) tears down the
+connection and retries with exponential back-off (1 s → 30 s), and the
+back-off resets after every successful `HELLO`.
+
+The server never pushes to an idle client, so a silent drop — e.g. the
+`ugreen_leds_server` process restarting while the VM state is unchanged —
+would otherwise go unnoticed on the socket. The agent therefore re-asserts
+the current state every `HeartbeatSeconds` (default 60 s). A same-state
+`SET` is a no-op for the server (no hardware write), but the
+`SET`/`FLUSH` round-trip proves the connection is alive. After a server
+restart the agent reconnects within one heartbeat, re-`HELLO`s, and
+immediately re-asserts the current colour, re-acquiring ownership of
+`$LedName`.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `HeartbeatSeconds` | 60 | Re-assert interval; bounds how long a dead connection goes unnoticed |
+| `ConnectTimeoutMs` | 10000 | Max wait for a TCP connect |
+| `SocketTimeoutMs` | 30000 | Max wait for a send/recv (guards against network partitions) |
+| `BackoffMaxMs` | 30000 | Max delay between reconnect attempts |
