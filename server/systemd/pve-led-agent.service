@@ -1,0 +1,35 @@
+[Unit]
+Description=PVE host CPU/memory power LED agent for UGREEN NAS
+Wants=network-online.target
+After=network-online.target ugreen-leds-server.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+Environment=PYTHONUNBUFFERED=1
+Environment=LED_HOST=127.0.0.1
+Environment=LED_PORT=39001
+Environment=PRIORITY=20
+EnvironmentFile=-/etc/pve-led-agent.env
+ExecStart=/usr/bin/python3 /usr/local/bin/pve_host.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pve-led-agent
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
